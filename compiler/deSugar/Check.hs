@@ -88,8 +88,8 @@ data PmPat rec_pats
   | VarAbs Id
 -}
 
-type PatVec   = [Pattern] -- Just a type synonym for pattern vectors ps
-type ValueVec = [ValAbs]  -- Just a type synonym for velue   vectors as
+type PatVec    = [Pattern] -- Just a type synonym for pattern vectors ps
+type ValVecAbs = [ValAbs]  -- Just a type synonym for value   vectors as
 
 -- The difference between patterns (PmPat 'P)
 -- and value abstractios (PmPat 'V)
@@ -176,17 +176,53 @@ data ValSetAbs   -- Reprsents a set of value vector abstractions
   | Constraint [PmConstraint] ValSetAbs -- Extend Delta
   | Cons ValAbs ValSetAbs               -- map (ucon u) vs
 
+type PmResult = ( [[LPat Id]] -- redundant (do not show the guards)
+                , [[LPat Id]] -- inaccessible rhs (do not show the guards)
+                , [([ValAbs],[PmConstraint])] ) -- missing (to be improved)
+
 {-
 %************************************************************************
 %*                                                                      *
-\subsection{Entry point to the checker: check}
+\subsection{Entry points to the checker: checkSingle and checkMatches}
 %*                                                                      *
 %************************************************************************
 -}
 
-type PmResult = ( [[LPat Id]] -- redundant (do not show the guards)
-                , [[LPat Id]] -- inaccessible rhs (do not show the guards)
-                , [([ValAbs],[PmConstraint])] ) -- missing (to be improved)
+-- Check a single pattern binding (let)
+checkSingle :: Type -> Pat Id -> DsM PmResult
+checkSingle ty p = do
+  let lp = [noLoc p]
+  vec <- liftUs (translatePat p)
+  vsa <- initial_uncovered [ty]
+  (c,d,us'') <- patVectProc (vec,[]) vsa -- no guards
+  us <- pruneValSetAbs us''
+  let us' = valSetAbsToList us
+  return $ case (c,d) of
+    (True,  _)     -> ([],   [],   us')
+    (False, True)  -> ([],   [lp], us')
+    (False, False) -> ([lp], [],   us')
+
+-- Check a matchgroup (case, etc)
+checkMatches :: [Type] -> [LMatch Id (LHsExpr Id)] -> DsM PmResult
+checkMatches tys matches
+  | null matches = return ([],[],[])
+  | otherwise    = do
+      missing    <- initial_uncovered tys
+      (rs,is,us) <- go matches missing
+      return (map hsLMatchPats rs, map hsLMatchPats is, valSetAbsToList us) -- Turn them into a list so we can take as many as we want
+  where
+    go [] missing = do
+      missing' <- pruneValSetAbs missing
+      return ([], [], missing')
+
+    go (m:ms) missing = do
+      clause        <- liftUs (translateMatch m)
+      (c,  d,  us ) <- patVectProc clause missing
+      (rs, is, us') <- go ms us
+      return $ case (c,d) of
+        (True,  _)     -> (  rs,   is, us')
+        (False, True)  -> (  rs, m:is, us')
+        (False, False) -> (m:rs,   is, us')
 
 initial_uncovered :: [Type] -> DsM ValSetAbs
 initial_uncovered tys = do
@@ -217,21 +253,13 @@ truePmPat = nullaryPmConPat trueDataCon
 -- falsePmPat = nullaryPmConPat falseDataCon
 
 nilPmPat :: Type -> PmPat abs
-nilPmPat ty = mkPmConPat nilDataCon [ty] [] [] []
+nilPmPat ty = ConAbs { cabs_con = nilDataCon, cabs_arg_tys = [ty]
+                     , cabs_tvs = [], cabs_dicts = [], cabs_args = [] }
 
--- The result wont be a list after the change
 mkListPmPat :: Type -> [PmPat abs] -> [PmPat abs] -> [PmPat abs]
 mkListPmPat ty xs ys = [ConAbs { cabs_con = consDataCon, cabs_arg_tys = [ty]
                                , cabs_tvs = [], cabs_dicts = []
                                , cabs_args = xs++ys }]
-
-mkPmConPat :: DataCon -> [Type] -> [TyVar] -> [EvVar] -> [PmPat abs] -> PmPat abs
-mkPmConPat con arg_tys ex_tvs dicts args
-  = ConAbs { cabs_con     = con
-           , cabs_arg_tys = arg_tys
-           , cabs_tvs     = ex_tvs
-           , cabs_dicts   = dicts
-           , cabs_args    = args }
 
 mkLitPmPat :: HsLit -> PmPat abs
 mkLitPmPat lit = LitAbs { labs_lit = PmLit lit }
@@ -307,14 +335,19 @@ translatePat pat = case pat of
             , pat_dicts   = dicts
             , pat_args    = ps } -> do
     args <- translateConPatVec arg_tys ex_tvs con ps
-    return [mkPmConPat con arg_tys ex_tvs dicts args]
+    return [ConAbs { cabs_con     = con
+                   , cabs_arg_tys = arg_tys
+                   , cabs_tvs     = ex_tvs
+                   , cabs_dicts   = dicts
+                   , cabs_args    = args }]
 
   NPat lit mb_neg _eq
-    | Just _ <- mb_neg -> return [mkNegLitPmPat lit] -- negated literal
-    | otherwise        -> return [mkPosLitPmPat lit] -- non-negated literal (I would prefer this to be [Nothing <- mb_neg])
+    | Just _  <- mb_neg -> return [mkNegLitPmPat lit] -- negated literal
+    | Nothing <- mb_neg -> return [mkPosLitPmPat lit] -- non-negated literal
 
   LitPat lit
-    | HsString src s <- lit -> -- If it is a real string convert it to a list of characters
+      -- If it is a string then convert it to a list of characters
+    | HsString src s <- lit ->
         foldr (mkListPmPat charTy) [nilPmPat charTy] <$>
           translatePatVec (map (LitPat . HsChar src) (unpackFS s))
     | otherwise -> return [mkLitPmPat lit]
@@ -322,12 +355,20 @@ translatePat pat = case pat of
   PArrPat ps ty -> do
     tidy_ps <-translatePatVec (map unLoc ps)
     let fake_con = parrFakeCon (length ps)
-    return [mkPmConPat fake_con [ty] [] [] (concat tidy_ps)]
+    return [ConAbs { cabs_con     = fake_con
+                   , cabs_arg_tys = [ty]
+                   , cabs_tvs     = []
+                   , cabs_dicts   = []
+                   , cabs_args    = concat tidy_ps }]
 
   TuplePat ps boxity tys -> do
     tidy_ps   <- translatePatVec (map unLoc ps)
     let tuple_con = tupleCon (boxityNormalTupleSort boxity) (length ps)
-    return [mkPmConPat tuple_con tys  [] [] (concat tidy_ps)]
+    return [ConAbs { cabs_con     = tuple_con
+                   , cabs_arg_tys = tys
+                   , cabs_tvs     = []
+                   , cabs_dicts   = []
+                   , cabs_args    = concat tidy_ps }]
 
   -- --------------------------------------------------------------------------
   -- Not supposed to happen
@@ -343,17 +384,25 @@ translateConPatVec :: [Type] -> [TyVar] -> DataCon -> HsConPatDetails Id -> Uniq
 translateConPatVec _univ_tys _ex_tvs _ (PrefixCon ps)   = concat <$> translatePatVec (map unLoc ps)
 translateConPatVec _univ_tys _ex_tvs _ (InfixCon p1 p2) = concat <$> translatePatVec (map unLoc [p1,p2])
 translateConPatVec  univ_tys  ex_tvs c (RecCon (HsRecFields fs _))
-  | null fs        = mkPmVarsSM arg_tys                            -- Nothing matched. Make up some fresh variables
-  | null orig_lbls = ASSERT (null matched_lbls) mkPmVarsSM arg_tys -- If it is not a record but uses record syntax it can only be {}. So just like above
-  -- It is an optimisation anyway, we can avoid doing it..
-  | matched_lbls `subsetOf` orig_lbls = ASSERT (length orig_lbls == length arg_tys) -- Ordered: The easy case (no additional guards)
+    -- Nothing matched. Make up some fresh term variables
+  | null fs        = mkPmVarsSM arg_tys
+    -- The data constructor was not defined using record syntax. For the
+    -- pattern to be in record syntax it should be empty (e.g. Just {}).
+    -- So just like the previous case.
+  | null orig_lbls = ASSERT (null matched_lbls) mkPmVarsSM arg_tys
+    -- Some of the fields appear, in the original order (there may be holes).
+    -- Generate a simple constructor pattern and make up fresh variables for
+    -- the rest of the fields
+  | matched_lbls `subsetOf` orig_lbls = ASSERT (length orig_lbls == length arg_tys)
       let translateOne (lbl, ty) = case lookup lbl matched_pats of
             Just p  -> translatePat p
             Nothing -> mkPmVarsSM [ty]
       in  concatMapM translateOne (zip orig_lbls arg_tys)
-  | otherwise = do                         -- Not Ordered: We match against all patterns and add (strict) guards to match in the right order
-      arg_var_pats <- mkPmVarsSM arg_tys -- the normal variable patterns -- no forcing yet
-
+    -- The fields that appear are not in the correct order. Make up fresh
+    -- variables for all fields and add guards after matching, to force the
+    -- evaluation in the correct order.
+  | otherwise = do
+      arg_var_pats    <- mkPmVarsSM arg_tys
       translated_pats <- forM matched_pats $ \(x,pat) -> do
         pvec <- translatePat pat
         return (x, pvec)
@@ -417,7 +466,6 @@ translateGuards guards = do
       | [p] <- pv, VarAbs {} <- p = True  -- Binds to variable? We don't branch (Y)
       | isNotPmExprOther expr     = True  -- The expression is "normal"? We branch but we want that
       | otherwise                 = False -- Otherwise it branches without being useful
-
 -- | Should have been (but is too expressive):
 -- translateGuards guards = concat <$> mapM translateGuard guards
 
@@ -461,13 +509,12 @@ translateBoolGuard e
 -- ----------------------------------------------------------------------------
 -- | Process a vector
 
--- -- covered, uncovered, eliminated
-process_guards :: UniqSupply -> [PatVec] -> (ValSetAbs, ValSetAbs, ValSetAbs)
-process_guards _us [] = (Singleton, Empty, Empty)                   -- No guard == Trivially True guard
-process_guards us  gs | any null gs = (Singleton, Empty, Singleton) -- Contains an empty guard? == it is exhaustive [Too conservative for divergence]
-                      | otherwise   = go us Singleton gs
+process_guards :: UniqSupply -> [PatVec] -> (ValSetAbs, ValSetAbs, ValSetAbs) -- covered, uncovered, eliminated
+process_guards _us [] = (Singleton, Empty, Empty) -- No guard == True guard
+process_guards us  gs
+  | any null gs = (Singleton, Empty, Singleton) -- Contains an empty guard? == it is exhaustive [Too conservative for divergence]
+  | otherwise   = go us Singleton gs
   where
-    -- Make sure the base cases are correct
     go _usupply missing []       = (Empty, missing, Empty)
     go  usupply missing (gv:gvs) = (mkUnion cs css, uss, mkUnion ds dss)
       where
@@ -478,18 +525,6 @@ process_guards us  gs | any null gs = (Singleton, Empty, Singleton) -- Contains 
         ds = divergent us3 Empty     gv missing
 
         (css, uss, dss) = go us4 us gvs
-
--- ----------------------------------------------------------------------------
--- ----------------------------------------------------------------------------
-
---- ----------------------------------------------------------------------------
--- | Main function 1 (covered)
-
--- ----------------------------------------------------------------------------
--- | Main function 2 (uncovered)
-
--- ----------------------------------------------------------------------------
--- | Main function 3 (divergent)
 
 -- ----------------------------------------------------------------------------
 -- | Getting some more uniques
@@ -587,7 +622,9 @@ wrapK con = wrapK_aux (dataConSourceArity con) emptylist
   where
     wrapK_aux :: Int -> DList ValAbs -> ValSetAbs -> ValSetAbs
     wrapK_aux _ _    Empty               = Empty
-    wrapK_aux 0 args vsa                 = mkPmConPat con [] [] [] {- FIXME -} (toList args) `mkCons` vsa
+    wrapK_aux 0 args vsa                 = ConAbs { cabs_con = con, cabs_arg_tys = [] {- SHOULD THESE BE EMPTY? -}
+                                                  , cabs_tvs = [], cabs_dicts = []
+                                                  , cabs_args = toList args } `mkCons` vsa
     wrapK_aux _ _    Singleton           = panic "wrapK: Singleton"
     wrapK_aux n args (Cons vs vsa)       = wrapK_aux (n-1) (args `snoc` vs) vsa
     wrapK_aux n args (Constraint cs vsa) = cs `mkConstraint` wrapK_aux n args vsa
@@ -756,21 +793,7 @@ pruneValSetAbs = pruneValSetAbs' []
       mb_vsa <- pruneValSetAbs' cs vsa
       return $ mkCons va mb_vsa
 
-{-
-%************************************************************************
-%*                                                                      *
-\subsection{The type equality oracle (OutsideIn(X) wrapper)}
-%*                                                                      *
-%************************************************************************
-
--}
-
--- -----------------------------------------------------------------------
--- | Interface to the solver
--- This is a hole for a contradiction checker. The actual type must be
--- (Bag EvVar, PmGuard) -> Bool. It should check whether are satisfiable both:
---  * The type constraints
---  * THe term constraints
+-- It checks whether a set of type constraints is satisfiable.
 tyOracle :: Bag EvVar -> PmM Bool
 tyOracle evs
   = do { ((_warns, errs), res) <- initTcDsForSolver $ tcCheckSatisfiability evs
@@ -779,75 +802,16 @@ tyOracle evs
             Nothing  -> pprPanic "tyOracle" (vcat $ pprErrMsgBagWithLoc errs) }
 
 {-
-%************************************************************************
-%*                                                                      *
-\subsection{Pretty Printing}
-%*                                                                      *
-%************************************************************************
--}
-
-pprUncovered :: [([ValAbs],[PmConstraint])] -> SDoc
-pprUncovered vsa = vcat (map pprOne vsa)
-  where
-    pprOne (vs, cs) = ppr vs <+> ptext (sLit "|>") <+> ppr cs
-
-instance Outputable PmConstraint where
-  ppr (TmConstraint x expr) = ppr x <+> equals <+> ppr expr
-  ppr (TyConstraint theta)  = pprSet $ map idType theta
-  ppr (BtConstraint x)      = braces (ppr x <+> ptext (sLit "~") <+> ptext (sLit "_|_"))
-
-instance Outputable (PmPat abs) where
-  ppr (GBindAbs pats expr)          = ppr pats <+> ptext (sLit "<-") <+> ppr expr
-  ppr (ConAbs { cabs_con  = con
-              , cabs_args = args }) = sep [ppr con, pprWithParens args]
-  ppr (VarAbs x)                    = ppr x
-  ppr (LitAbs l)                    = ppr l
-
-instance Outputable ValSetAbs where
-  ppr = pprValSetAbs
-
-pprWithParens :: [PmPat abs] -> SDoc
-pprWithParens pats = sep (map paren_if_needed pats)
-  where paren_if_needed p | ConAbs { cabs_args = args } <- p, not (null args)  = parens (ppr p)
-                          | GBindAbs ps _               <- p, not (null ps)    = parens (ppr p)
-                          | LitAbs l                    <- p, isNegatedPmLit l = parens (ppr p)
-                          | otherwise = ppr p
-
-pprValSetAbs :: ValSetAbs -> SDoc
-pprValSetAbs = hang (ptext (sLit "Set:")) 2 . vcat . map print_vec . valSetAbsToList
-  where
-    print_vec (vec, cs) =
-      let (ty_cs, tm_cs, bots) = splitConstraints cs
-      in  hang (ptext (sLit "vector:") <+> ppr vec <+> ptext (sLit "|>")) 2 $
-            vcat [ ptext (sLit "type_cs:") <+> pprSet (map idType ty_cs)
-                 , ptext (sLit "term_cs:") <+> ppr tm_cs
-                 , ptext (sLit "bottoms:") <+> ppr bots ]
-
-pprSet :: Outputable id => [id] -> SDoc
-pprSet lits = braces $ sep $ punctuate comma $ map ppr lits
-
-{-
 Note [Pattern match check give up]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-There are some cases where we cannot perform the check. A simple example is
-trac #322:
+A simple example is trac #322:
 \begin{verbatim}
   f :: Maybe Int -> Int
   f 1 = 1
   f Nothing = 2
   f _ = 3
 \end{verbatim}
-
-In this case, the first line is compiled as
-\begin{verbatim}
-  f x | x == fromInteger 1 = 1
-\end{verbatim}
-
-To check this match, we should perform arbitrary computations at compile time
-(@fromInteger 1@) which is highly undesirable. Hence, we simply give up by
-returning a @Nothing@.
 -}
-
 
 {-
 %************************************************************************
@@ -868,38 +832,47 @@ patternArity (ConAbs   {}) = 1
 patternArity (VarAbs   {}) = 1
 patternArity (LitAbs   {}) = 1
 
--- Should get a default value because an empty set has any arity
--- (We have no value vector abstractions to see)
-vsaArity :: PmArity -> ValSetAbs -> PmArity
-vsaArity  arity Empty = arity
-vsaArity _arity vsa   = ASSERT (allTheSame arities) (head arities)
-  where arities = vsaArities vsa
-
-vsaArities :: ValSetAbs -> [PmArity] -- Arity for every path. INVARIANT: All the same
-vsaArities Empty              = []
-vsaArities (Union vsa1 vsa2)  = vsaArities vsa1 ++ vsaArities vsa2
-vsaArities Singleton          = [0]
-vsaArities (Constraint _ vsa) = vsaArities vsa
-vsaArities (Cons _ vsa)       = [1 + arity | arity <- vsaArities vsa]
-
-allTheSame :: Eq a => [a] -> Bool
-allTheSame []     = True
-allTheSame (x:xs) = all (==x) xs
-
-sameArity :: PatVec -> ValSetAbs -> Bool
-sameArity pv vsa = vsaArity pv_a vsa == pv_a
-  where pv_a = patVecArity pv
-
+-- -- Should get a default value because an empty set has any arity
+-- -- (We have no value vector abstractions to see)
+-- vsaArity :: PmArity -> ValSetAbs -> PmArity
+-- vsaArity  arity Empty = arity
+-- vsaArity _arity vsa   = ASSERT (allTheSame arities) (head arities)
+--   where arities = vsaArities vsa
+-- 
+-- vsaArities :: ValSetAbs -> [PmArity] -- Arity for every path. INVARIANT: All the same
+-- vsaArities Empty              = []
+-- vsaArities (Union vsa1 vsa2)  = vsaArities vsa1 ++ vsaArities vsa2
+-- vsaArities Singleton          = [0]
+-- vsaArities (Constraint _ vsa) = vsaArities vsa
+-- vsaArities (Cons _ vsa)       = [1 + arity | arity <- vsaArities vsa]
+-- 
+-- allTheSame :: Eq a => [a] -> Bool
+-- allTheSame []     = True
+-- allTheSame (x:xs) = all (==x) xs
+-- 
+-- sameArity :: PatVec -> ValSetAbs -> Bool
+-- sameArity pv vsa = vsaArity pv_a vsa == pv_a
+--   where pv_a = patVecArity pv
 
 {-
 %************************************************************************
 %*                                                                      *
-\subsection{Let's start over, shall we?}
+\subsection{Heart of the algorithm: Function patVectProc}
 %*                                                                      *
 %************************************************************************
 -}
 
---- ----------------------------------------------------------------------------
+patVectProc :: (PatVec, [PatVec]) -> ValSetAbs -> PmM (Bool, Bool, ValSetAbs) -- Covers? Forces? U(n+1)?
+patVectProc (vec,gvs) vsa = do
+  us <- getUniqueSupplyM
+  let (c_def, u_def, d_def) = process_guards us gvs -- default (the continuation)
+  (usC, usU, usD) <- getUniqueSupplyM3
+  mb_c <- anySatValSetAbs (covered   usC c_def vec vsa)
+  mb_d <- anySatValSetAbs (divergent usD d_def vec vsa)
+  let vsa' = uncovered usU u_def vec vsa
+  return (mb_c, mb_d, vsa')
+
+-- ----------------------------------------------------------------------------
 -- | Main function 1 (covered)
 
 --THE SECOND ARGUMENT IS THE CONT, WHAT TO PLUG AT THE END (GUARDS)
@@ -1168,53 +1141,52 @@ divergent _usupply _gvsa (VarAbs _  : _) Singleton  = panic "divergent: length m
 divergent _usupply _gvsa (LitAbs {} : _) Singleton  = panic "divergent: length mismatch: literal-sing"
 divergent _usupply _gvsa []              (Cons _ _) = panic "divergent: length mismatch: Cons"
 
--- ----------------------------------------------------------------------------
+{-
+%************************************************************************
+%*                                                                      *
+\subsection{Pretty Printing}
+%*                                                                      *
+%************************************************************************
+-}
 
-patVectProc :: (PatVec, [PatVec]) -> ValSetAbs -> PmM (Bool, Bool, ValSetAbs) -- Covers? Forces? U(n+1)?
-patVectProc (vec,gvs) vsa = do
-  us <- getUniqueSupplyM
-  let (c_def, u_def, d_def) = process_guards us gvs -- default (the continuation)
-  (usC, usU, usD) <- getUniqueSupplyM3
-  mb_c <- anySatValSetAbs (covered   usC c_def vec vsa)
-  mb_d <- anySatValSetAbs (divergent usD d_def vec vsa)
-  let vsa' = uncovered usU u_def vec vsa
-  return (mb_c, mb_d, vsa')
+pprUncovered :: [([ValAbs],[PmConstraint])] -> SDoc
+pprUncovered vsa = vcat (map pprOne vsa)
+  where
+    pprOne (vs, cs) = ppr vs <+> ptext (sLit "|>") <+> ppr cs
 
--- Single pattern binding (let)
-checkSingle :: Type -> Pat Id -> DsM PmResult
-checkSingle ty p = do
-  let lp = [noLoc p]
-  vec <- liftUs (translatePat p)
-  vsa <- initial_uncovered [ty]
-  (c,d,us'') <- patVectProc (vec,[]) vsa -- no guards
-  us <- pruneValSetAbs us''
-  let us' = valSetAbsToList us
-  return $ case (c,d) of
-    (True,  _)     -> ([],   [],   us')
-    (False, True)  -> ([],   [lp], us')
-    (False, False) -> ([lp], [],   us')
+instance Outputable PmConstraint where
+  ppr (TmConstraint x expr) = ppr x <+> equals <+> ppr expr
+  ppr (TyConstraint theta)  = pprSet $ map idType theta
+  ppr (BtConstraint x)      = braces (ppr x <+> ptext (sLit "~") <+> ptext (sLit "_|_"))
 
-checkMatches :: [Type] -> [LMatch Id (LHsExpr Id)] -> DsM PmResult
-checkMatches tys matches
-  | null matches = return ([],[],[])
-  | otherwise    = do
-      missing <- initial_uncovered tys
-      (rs,is,us) <- checkMatches' matches missing
-      return (map hsLMatchPats rs, map hsLMatchPats is, valSetAbsToList us) -- Turn them into a list so we can take as many as we want
+instance Outputable (PmPat abs) where
+  ppr (GBindAbs pats expr)          = ppr pats <+> ptext (sLit "<-") <+> ppr expr
+  ppr (ConAbs { cabs_con  = con
+              , cabs_args = args }) = sep [ppr con, pprWithParens args]
+  ppr (VarAbs x)                    = ppr x
+  ppr (LitAbs l)                    = ppr l
 
-checkMatches' :: [LMatch Id (LHsExpr Id)] -> ValSetAbs -> DsM ( [LMatch Id (LHsExpr Id)] -- Redundant matches
-                                                              , [LMatch Id (LHsExpr Id)] -- Inaccessible rhs
-                                                              , ValSetAbs )              -- Left uncovered
-checkMatches' [] missing = do
-  missing' <- pruneValSetAbs missing
-  return ([], [], missing')
+instance Outputable ValSetAbs where
+  ppr = pprValSetAbs
 
-checkMatches' (m:ms) missing = do
-  patterns_n_guards <- liftUs (translateMatch m)
-  (c,  d,  us ) <- patVectProc patterns_n_guards missing
-  (rs, is, us') <- checkMatches' ms us
-  return $ case (c,d) of
-    (True,  _)     -> (  rs,   is, us')
-    (False, True)  -> (  rs, m:is, us')
-    (False, False) -> (m:rs,   is, us')
+pprWithParens :: [PmPat abs] -> SDoc
+pprWithParens pats = sep (map paren_if_needed pats)
+  where paren_if_needed p | ConAbs { cabs_args = args } <- p, not (null args)  = parens (ppr p)
+                          | GBindAbs ps _               <- p, not (null ps)    = parens (ppr p)
+                          | LitAbs l                    <- p, isNegatedPmLit l = parens (ppr p)
+                          | otherwise = ppr p
+
+pprValSetAbs :: ValSetAbs -> SDoc
+pprValSetAbs = hang (ptext (sLit "Set:")) 2 . vcat . map print_vec . valSetAbsToList
+  where
+    print_vec (vec, cs) =
+      let (ty_cs, tm_cs, bots) = splitConstraints cs
+      in  hang (ptext (sLit "vector:") <+> ppr vec <+> ptext (sLit "|>")) 2 $
+            vcat [ ptext (sLit "type_cs:") <+> pprSet (map idType ty_cs)
+                 , ptext (sLit "term_cs:") <+> ppr tm_cs
+                 , ptext (sLit "bottoms:") <+> ppr bots ]
+
+pprSet :: Outputable id => [id] -> SDoc
+pprSet lits = braces $ sep $ punctuate comma $ map ppr lits
+
 

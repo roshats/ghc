@@ -12,7 +12,7 @@ module TmOracle
 , isNotPmExprOther
 , hsExprToPmExpr, lhsExprToPmExpr
 , tmOracle
-, pmLitType, notForced, isNegatedPmLit, falsePmExpr
+, pmLitType, notForced, isNegatedPmLit, falsePmExpr, getValuePmExpr
 ) where -- you have to export less stuff
 
 #include "HsVersions.h"
@@ -96,11 +96,11 @@ instance Outputable PmLit where
   ppr (PmOLit neg l) = (if neg then char '-' else empty) <> ppr l
 
 instance Outputable PmExpr where
-  ppr (PmExprVar x)    = ppr x
+  ppr (PmExprVar x)    = underscore -- ppr x
   ppr (PmExprCon c es) = sep (ppr c : map parenIfNeeded es)
   ppr (PmExprLit  l)   = ppr l
-  ppr (PmExprEq e1 e2) = parens (ppr e1 <+> equals <+> ppr e2)
-  ppr (PmExprOther e)  = braces (ppr e) -- Just print it so that we know
+  ppr (PmExprEq e1 e2) = underscore -- parens (ppr e1 <+> equals <+> ppr e2)
+  ppr (PmExprOther e)  = underscore -- braces (ppr e) -- Just print it so that we know
 
 parenIfNeeded :: PmExpr -> SDoc
 parenIfNeeded e =
