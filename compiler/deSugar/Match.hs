@@ -64,10 +64,7 @@ matchCheck :: DsMatchContext
            -> [EquationInfo]   -- Info about patterns, etc. (type synonym below)
            -> DsM MatchResult  -- Desugared result!
 
-matchCheck ctx vars ty qs
-  = do { dflags <- getDynFlags
-       -- ; dsPmWarn dflags ctx (map idType vars) qs
-       ; match vars ty qs }
+matchCheck _ctx vars ty qs = match vars ty qs -- remove this function maybe?
 
 {-
 ************************************************************************
@@ -699,7 +696,7 @@ matchWrapper ctxt (MG { mg_alts = matches
 
         -- pattern match check warnings
         ; unless (isGenerated origin) $
-            dsPmWarn dflags (DsMatchContext ctxt locn) (checkMatches2 arg_tys matches)
+            dsPmWarn dflags (DsMatchContext ctxt locn) (checkMatches arg_tys matches)
 
         ; eqns_info   <- mapM mk_eqn_info matches
         ; new_vars    <- case matches of
@@ -771,7 +768,7 @@ matchSinglePat (Var var) ctx (L _ pat) ty match_result
        ; locn   <- getSrcSpanDs
 
        -- pattern match check warnings
-       ; dsPmWarn dflags (DsMatchContext ctx locn) (checkSingle2 (idType var) pat)
+       ; dsPmWarn dflags (DsMatchContext ctx locn) (checkSingle (idType var) pat)
 
        ; matchCheck (DsMatchContext ctx locn)
                     [var] ty

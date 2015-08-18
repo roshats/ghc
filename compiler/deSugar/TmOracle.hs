@@ -7,7 +7,13 @@
 
 {-# LANGUAGE CPP #-}
 
-module TmOracle where -- you have to export less stuff
+module TmOracle
+( PmExpr(..), PmLit(..), PmVarEnv
+, isNotPmExprOther
+, hsExprToPmExpr, lhsExprToPmExpr
+, tmOracle
+, pmLitType, notForced, isNegatedPmLit, falsePmExpr
+) where -- you have to export less stuff
 
 #include "HsVersions.h"
 
@@ -18,11 +24,9 @@ import Id
 import DataCon
 import TysWiredIn
 import Outputable
-import Data.Maybe (isJust)
 import MonadUtils
 import Data.List (foldl')
 import Control.Arrow (first)
-import DsGRHSs (isTrueLHsExpr)
 import SrcLoc
 import BasicTypes (boxityNormalTupleSort)
 
@@ -85,6 +89,7 @@ data PmLit = PmLit  HsLit
 instance Eq PmLit where
   PmLit     l1 == PmLit l2     = l1 == l2
   PmOLit b1 l1 == PmOLit b2 l2 = b1 == b2 && l1 == l2
+  _ == _ = False
 
 instance Outputable PmLit where
   ppr (PmLit      l) = pmPprHsLit l
@@ -108,18 +113,6 @@ parenIfNeeded e =
 isNotPmExprOther :: PmExpr -> Bool
 isNotPmExprOther (PmExprOther _) = False
 isNotPmExprOther _expr           = True
-
-isPmExprOther :: PmExpr -> Bool
-isPmExprOther (PmExprOther _) = True
-isPmExprOther _expr           = False
-
-isPmLit :: PmExpr -> Bool
-isPmLit (PmExprLit (PmLit {})) = True
-isPmLit _other_expression      = False
-
-isPmOLit :: PmExpr -> Bool
-isPmOLit (PmExprLit (PmOLit {})) = True
-isPmOLit _other_expression       = False
 
 isNegatedPmLit :: PmLit -> Bool
 isNegatedPmLit (PmOLit b _) = b
@@ -247,9 +240,6 @@ isTruePmExpr _other_expr      = False
 isFalsePmExpr :: PmExpr -> Bool
 isFalsePmExpr (PmExprCon c []) = c == falseDataCon
 isFalsePmExpr _other_expr      = False
-
-isTrivialTrueLHsExpr :: LHsExpr Id -> Bool
-isTrivialTrueLHsExpr lexpr = isJust (isTrueLHsExpr lexpr)
 
 -- ----------------------------------------------------------------------------
 -- | Substitution for PmExpr
@@ -430,13 +420,19 @@ certainlyEqual e1 e2 =
     eqVars :: Id -> Id -> PmExpr
     eqVars x y = if x == y then truePmExpr else expr
 
-    eqLit :: Eq a => a -> a -> PmExpr
-    eqLit x y | x == y    = truePmExpr
-              | otherwise = falsePmExpr
+    eqLit :: PmLit -> PmLit -> PmExpr
+    eqLit l1 l2 = case (l1, l2) of
+      (PmLit {}, PmLit {})
+        | l1 == l2  -> truePmExpr
+        | otherwise -> falsePmExpr
+      (PmOLit {}, PmOLit {})
+        | l1 == l2  -> truePmExpr
+        | otherwise -> falsePmExpr
+      _overloaded   -> expr
 
     certainlyEqualMany :: [PmExpr] -> [PmExpr] -> PmExpr
     certainlyEqualMany es1 es2 =
-      let args   = map (uncurry certainlyEqual) (es1 `zip` es2)
+      let args   = zipWith certainlyEqual es1 es2
           result | all isTruePmExpr  args = truePmExpr
                  | any isFalsePmExpr args = falsePmExpr
                  | otherwise              = expr -- inconclusive
@@ -570,7 +566,7 @@ hsExprToPmExpr (HsVar         x) = PmExprVar x
 hsExprToPmExpr (HsOverLit  olit) = PmExprLit (PmOLit False olit)
 hsExprToPmExpr (HsLit       lit) = PmExprLit (PmLit lit)
 
-hsExprToPmExpr e@(NegApp (L _ neg) neg_e)
+hsExprToPmExpr e@(NegApp _ neg_e)
   | PmExprLit (PmOLit False ol) <- hsExprToPmExpr neg_e = PmExprLit (PmOLit True ol)
   | otherwise                                           = PmExprOther e
 hsExprToPmExpr (HsPar   (L _ e)) = hsExprToPmExpr e
@@ -582,7 +578,7 @@ hsExprToPmExpr e@(ExplicitTuple ps boxity)
     tuple_con  = tupleCon (boxityNormalTupleSort boxity) (length ps)
     tuple_args = [ lhsExprToPmExpr e | L _ (Present e) <- ps ]
 
-hsExprToPmExpr e@(ExplicitList elem_ty mb_ol elems)
+hsExprToPmExpr e@(ExplicitList _elem_ty mb_ol elems)
   | Nothing <- mb_ol = foldr cons nil (map lhsExprToPmExpr elems)
   | otherwise        = PmExprOther e {- overloaded list: No PmExprApp -}
   where
