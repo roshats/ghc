@@ -8,11 +8,13 @@
 {-# LANGUAGE CPP #-}
 
 module TmOracle
-( PmExpr(..), PmLit(..), PmVarEnv
-, isNotPmExprOther
+( PmExpr(..), PmLit(..), PmVarEnv, TmOracleEnv, ComplexEq
+, isNotPmExprOther, isPmExprEq, isNegatedPmLit, isFalsePmExpr
 , hsExprToPmExpr, lhsExprToPmExpr
 , tmOracle
-, pmLitType, notForced, isNegatedPmLit, falsePmExpr, getValuePmExpr
+, pmLitType, notForced, falsePmExpr, isConsDataCon
+
+, runPmPprM, pprPmExpr, pprPmExprWithParens, PmPprM, filterComplex, getValuePmExpr, flattenPmVarEnv, PmNegLitCt
 ) where -- you have to export less stuff
 
 #include "HsVersions.h"
@@ -24,12 +26,16 @@ import Id
 import DataCon
 import TysWiredIn
 import Outputable
+import Util
 import MonadUtils
-import Data.List (foldl')
 import Control.Arrow (first)
 import SrcLoc
 import BasicTypes (boxityNormalTupleSort)
+import FastString (sLit)
 
+import VarSet
+import Data.Maybe (mapMaybe)
+import Data.List (foldl', groupBy, sortBy, nub)
 import Control.Monad.Trans.State.Lazy
 import Control.Monad.Trans.Except
 import Control.Monad.Trans.Class (lift)
@@ -95,20 +101,9 @@ instance Outputable PmLit where
   ppr (PmLit      l) = pmPprHsLit l
   ppr (PmOLit neg l) = (if neg then char '-' else empty) <> ppr l
 
+-- not really useful for pmexprs per se
 instance Outputable PmExpr where
-  ppr (PmExprVar x)    = underscore -- ppr x
-  ppr (PmExprCon c es) = sep (ppr c : map parenIfNeeded es)
-  ppr (PmExprLit  l)   = ppr l
-  ppr (PmExprEq e1 e2) = underscore -- parens (ppr e1 <+> equals <+> ppr e2)
-  ppr (PmExprOther e)  = underscore -- braces (ppr e) -- Just print it so that we know
-
-parenIfNeeded :: PmExpr -> SDoc
-parenIfNeeded e =
-  case e of
-    PmExprLit l   -> (if isNegatedPmLit l then parens else id) (ppr e)
-    PmExprCon _ es | null es   -> ppr e
-                   | otherwise -> parens (ppr e)
-    _other_expr   -> ppr e
+  ppr e = fst $ runPmPprM (pprPmExpr e) []
 
 isNotPmExprOther :: PmExpr -> Bool
 isNotPmExprOther (PmExprOther _) = False
@@ -121,6 +116,13 @@ isNegatedPmLit _other_lit   = False
 pmLitType :: PmLit -> Type
 pmLitType (PmLit    lit) = hsLitType   lit
 pmLitType (PmOLit _ lit) = overLitType lit
+
+isConsDataCon :: DataCon -> Bool
+isConsDataCon con = consDataCon == con
+
+isNilPmExpr :: PmExpr -> Bool
+isNilPmExpr (PmExprCon c _) = c == nilDataCon
+isNilPmExpr _other_expr     = False
 
 -- ----------------------------------------------------------------------------
 -- | Oracle Types
@@ -149,7 +151,7 @@ type Failure = ComplexEq
 -- recursive so there is not termination problem at the moment).
 type PmVarEnv = Map Id PmExpr
 
-type TmOracleEnv = ([ComplexEq], PmVarEnv) -- The first is the things we cannos solve (HsExpr, overloading rubbish, etc.)
+type TmOracleEnv = ([ComplexEq], PmVarEnv) -- The first is the things we cannot solve (HsExpr, overloading rubbish, etc.)
 
 -- | The oracle monad.
 type TmOracleM a = StateT TmOracleEnv (Except Failure) a -- keep eqs (x~HsExpr) in the environment. We wont do anything with them
@@ -240,6 +242,10 @@ isTruePmExpr _other_expr      = False
 isFalsePmExpr :: PmExpr -> Bool
 isFalsePmExpr (PmExprCon c []) = c == falseDataCon
 isFalsePmExpr _other_expr      = False
+
+isPmExprEq :: PmExpr -> Maybe (PmExpr, PmExpr)
+isPmExprEq (PmExprEq e1 e2) = Just (e1,e2)
+isPmExprEq _other_expr      = Nothing
 
 -- ----------------------------------------------------------------------------
 -- | Substitution for PmExpr
@@ -468,6 +474,10 @@ notForced x env = case getValuePmExpr env (PmExprVar x) of
   PmExprVar _ -> True
   _other_expr -> False
 
+-- Not really efficient, it recomputes stuff
+flattenPmVarEnv :: PmVarEnv -> PmVarEnv
+flattenPmVarEnv env = Map.map (getValuePmExpr env) env
+
 -- ----------------------------------------------------------------------------
 
 -- NOTE [Representation of substitution]
@@ -632,4 +642,115 @@ hsExprToPmExpr e@(EAsPat          _ _) = pprPanic "hsTomPmExpr:" (ppr e)
 hsExprToPmExpr e@(EViewPat        _ _) = pprPanic "hsTomPmExpr:" (ppr e)
 hsExprToPmExpr e@(ELazyPat          _) = pprPanic "hsTomPmExpr:" (ppr e)
 hsExprToPmExpr e@(HsType            _) = pprPanic "hsTomPmExpr:" (ppr e)
+
+-- ----------------------------------------------------
+type PmNegLitCt = (Id, (SDoc, [PmLit]))
+
+filterComplex :: [ComplexEq] -> [PmNegLitCt]
+filterComplex = zipWith rename nameList . map mkGroup
+              . groupBy name . sortBy order . mapMaybe isNegLitCs
+  where
+    order x y = compare (fst x) (fst y)
+    name  x y = fst x == fst y
+    mkGroup l = (fst (head l), nub $ map snd l)
+    rename new (old, lits) = (old, (new, lits))
+
+    isNegLitCs (e1,e2)
+      | isFalsePmExpr e1, Just (x,y) <- isPmExprEq e2 = isNegLitCs' x y
+      | isFalsePmExpr e2, Just (x,y) <- isPmExprEq e1 = isNegLitCs' x y
+      | otherwise = Nothing
+
+    isNegLitCs' (PmExprVar x) (PmExprLit l) = Just (x, l)
+    isNegLitCs' (PmExprLit l) (PmExprVar x) = Just (x, l)
+    isNegLitCs' _ _             = Nothing
+
+    nameList :: [SDoc]
+    nameList = [ ptext (sLit ('t':show u)) | u <- [(0 :: Int)..] ]
+
+-- ----------------------------------------------------------------------------
+
+runPmPprM :: PmPprM a -> [PmNegLitCt] -> (a, [(SDoc,[PmLit])])
+runPmPprM m lit_env = (result, mapMaybe is_used lit_env)
+  where
+    (result, (_lit_env, used)) = runState m (lit_env, emptyVarSet)
+
+    is_used (x,(name, lits))
+      | elemVarSet x used = Just (name, lits)
+      | otherwise         = Nothing
+
+type PmPprM a = State ([PmNegLitCt], IdSet) a
+
+addUsed :: Id -> PmPprM ()
+addUsed x = modify (\(negated, used) -> (negated, extendVarSet used x))
+
+checkNegation :: Id -> PmPprM (Maybe SDoc) -- the the clean name if it is negated
+checkNegation x = do
+  negated <- gets fst
+  return $ case lookup x negated of
+    Just (new, _) -> Just new
+    Nothing       -> Nothing
+
+-- | Pretty print a pmexpr, but remember to prettify the names of the variables that refer to neg-literals
+-- what you cannot say leave it an underscore
+pprPmExpr :: PmExpr -> PmPprM SDoc -- the first part of the state is read only. make it a reader? :/
+pprPmExpr (PmExprVar x) = do
+  mb_name <- checkNegation x
+  case mb_name of
+    Just name -> addUsed x >> return name
+    Nothing   -> return underscore
+pprPmExpr (PmExprCon con args) = pprPmExprCon con args
+pprPmExpr (PmExprLit    l) = return (ppr l)
+pprPmExpr (PmExprEq    {}) = return underscore
+pprPmExpr (PmExprOther {}) = return underscore
+
+needsParens :: PmExpr -> Bool
+needsParens (PmExprVar   {}) = False
+needsParens (PmExprLit    l) = isNegatedPmLit l
+needsParens (PmExprEq    {}) = False -- will become a wildcard
+needsParens (PmExprOther {}) = False -- will become a wildcard
+needsParens (PmExprCon c es)
+  | isTupleDataCon c || isPArrFakeCon c
+  || isConsDataCon c || null es = False -- List: either way it will get separated (parens on the whole thing or brackets if finite)
+  | otherwise                   = True
+
+pprPmExprWithParens :: PmExpr -> PmPprM SDoc
+pprPmExprWithParens expr
+  | needsParens expr = parens <$> pprPmExpr expr
+  | otherwise        =            pprPmExpr expr
+
+pprPmExprCon :: DataCon -> [PmExpr] -> PmPprM SDoc
+pprPmExprCon con args
+  | isTupleDataCon con = mkTuple <$> mapM pprPmExpr args
+  |  isPArrFakeCon con = mkPArr  <$> mapM pprPmExpr args
+  |  isConsDataCon con = list
+  | dataConIsInfix con = case args of
+      [x, y] -> do x' <- pprPmExprWithParens x
+                   y' <- pprPmExprWithParens y
+                   return (x' <+> ppr con <+> y')
+      list   -> pprPanic "pprPmExprCon:" (ppr list)
+  | null args = return (ppr con)
+  | otherwise = do args' <- mapM pprPmExprWithParens args
+                   return (fsep (ppr con : args'))
+  where
+    mkTuple, mkPArr :: [SDoc] -> SDoc
+    mkTuple = parens     . fsep . punctuate comma
+    mkPArr  = paBrackets . fsep . punctuate comma
+
+    list :: PmPprM SDoc
+    list = case isNilPmExpr (last elements) of
+      True  -> brackets . fsep . punctuate comma <$> mapM pprPmExpr (init elements)
+      False -> parens   . hcat . punctuate colon <$> mapM pprPmExpr elements
+
+    elements = mkLinearList args -- lazily, to be used in the list case only
+
+mkLinearList :: [PmExpr] -> [PmExpr]
+mkLinearList [x,y] = x : mkLinearList' y
+mkLinearList list  = pprPanic "mkLinearList:" (ppr list)
+
+mkLinearList' :: PmExpr -> [PmExpr]
+mkLinearList' e = case e of
+  PmExprCon c es
+    |  nilDataCon == c -> ASSERT (null es) [e]
+    | consDataCon == c -> mkLinearList es
+  _ -> [e]
 

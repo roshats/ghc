@@ -6,7 +6,8 @@
 {-# OPTIONS_GHC -Wwarn #-}   -- unused variables
 
 {-# LANGUAGE CPP #-}
-{-# LANGUAGE DataKinds, GADTs, KindSignatures #-}
+{-# LANGUAGE DataKinds, GADTs, KindSignatures, TupleSections #-}
+{-# LANGUAGE FlexibleInstances #-}
 
 module Check ( toTcTypeBag, pprUncovered, checkSingle, checkMatches, PmResult ) where
 
@@ -34,12 +35,13 @@ import TcSimplify( tcCheckSatisfiability )
 import TcType ( toTcType, toTcTypeBag )
 import Bag
 import ErrUtils
-import Data.List (find)
-import Data.Maybe (isJust)
 import MonadUtils -- MonadIO
 import Var (EvVar)
 import Type
 import UniqSupply
+
+import Data.List (find)
+import Data.Maybe (isJust)
 import Control.Monad (liftM, liftM3, forM)
 import Data.Maybe (isNothing, fromJust)
 import DsGRHSs (isTrueLHsExpr)
@@ -178,7 +180,7 @@ data ValSetAbs   -- Reprsents a set of value vector abstractions
 
 type PmResult = ( [[LPat Id]] -- redundant (do not show the guards)
                 , [[LPat Id]] -- inaccessible rhs (do not show the guards)
-                , [([ValAbs],[PmConstraint])] ) -- missing (to be improved)
+                , [(ValVecAbs,([ComplexEq], PmVarEnv))] ) -- [([ValAbs],[PmConstraint])] ) -- missing (to be improved)
 
 {-
 %************************************************************************
@@ -194,13 +196,12 @@ checkSingle ty p = do
   let lp = [noLoc p]
   vec <- liftUs (translatePat p)
   vsa <- initial_uncovered [ty]
-  (c,d,us'') <- patVectProc (vec,[]) vsa -- no guards
-  us <- pruneValSetAbs us''
-  let us' = valSetAbsToList us
+  (c,d,us') <- patVectProc (vec,[]) vsa -- no guards
+  us <- pruneValSetAbs us'
   return $ case (c,d) of
-    (True,  _)     -> ([],   [],   us')
-    (False, True)  -> ([],   [lp], us')
-    (False, False) -> ([lp], [],   us')
+    (True,  _)     -> ([],   [],   us)
+    (False, True)  -> ([],   [lp], us)
+    (False, False) -> ([lp], [],   us)
 
 -- Check a matchgroup (case, etc)
 checkMatches :: [Type] -> [LMatch Id (LHsExpr Id)] -> DsM PmResult
@@ -209,7 +210,7 @@ checkMatches tys matches
   | otherwise    = do
       missing    <- initial_uncovered tys
       (rs,is,us) <- go matches missing
-      return (map hsLMatchPats rs, map hsLMatchPats is, valSetAbsToList us) -- Turn them into a list so we can take as many as we want
+      return (map hsLMatchPats rs, map hsLMatchPats is, us)
   where
     go [] missing = do
       missing' <- pruneValSetAbs missing
@@ -251,6 +252,12 @@ truePmPat = nullaryPmConPat trueDataCon
 
 -- falsePmPat :: PmPat abs
 -- falsePmPat = nullaryPmConPat falseDataCon
+
+vanillaPmConPat :: DataCon -> [Type] -> [PmPat abs] -> PmPat abs
+-- ADT constructor pattern => no existentials, no local constraints
+vanillaPmConPat con arg_tys args
+  = ConAbs { cabs_con = con, cabs_arg_tys = arg_tys
+           , cabs_tvs = [], cabs_dicts = [], cabs_args = args }
 
 nilPmPat :: Type -> PmPat abs
 nilPmPat ty = ConAbs { cabs_con = nilDataCon, cabs_arg_tys = [ty]
@@ -335,7 +342,7 @@ translatePat pat = case pat of
             , pat_dicts   = dicts
             , pat_args    = ps } -> do
     args <- translateConPatVec arg_tys ex_tvs con ps
-    return [ConAbs { cabs_con     = con
+    return [ConAbs { cabs_con     = con -- I wish ghc could do record update with GADTs..
                    , cabs_arg_tys = arg_tys
                    , cabs_tvs     = ex_tvs
                    , cabs_dicts   = dicts
@@ -353,22 +360,14 @@ translatePat pat = case pat of
     | otherwise -> return [mkLitPmPat lit]
 
   PArrPat ps ty -> do
-    tidy_ps <-translatePatVec (map unLoc ps)
+    tidy_ps <- translatePatVec (map unLoc ps)
     let fake_con = parrFakeCon (length ps)
-    return [ConAbs { cabs_con     = fake_con
-                   , cabs_arg_tys = [ty]
-                   , cabs_tvs     = []
-                   , cabs_dicts   = []
-                   , cabs_args    = concat tidy_ps }]
+    return [vanillaPmConPat fake_con [ty] (concat tidy_ps)]
 
   TuplePat ps boxity tys -> do
     tidy_ps   <- translatePatVec (map unLoc ps)
     let tuple_con = tupleCon (boxityNormalTupleSort boxity) (length ps)
-    return [ConAbs { cabs_con     = tuple_con
-                   , cabs_arg_tys = tys
-                   , cabs_tvs     = []
-                   , cabs_dicts   = []
-                   , cabs_args    = concat tidy_ps }]
+    return [vanillaPmConPat tuple_con tys (concat tidy_ps)]
 
   -- --------------------------------------------------------------------------
   -- Not supposed to happen
@@ -738,7 +737,7 @@ splitConstraints (c : rest)
 -}
 
 -- Same interface to check all kinds of different constraints like in the paper
-satisfiable :: [PmConstraint] -> PmM (Maybe PmVarEnv) -- Bool -- Give back the substitution for pretty-printing
+satisfiable :: [PmConstraint] -> PmM (Maybe ([ComplexEq], PmVarEnv)) -- Bool -- Give back the substitution for pretty-printing
 satisfiable constraints = do
   let (ty_cs, tm_cs, bot_cs) = splitConstraints constraints
   sat <- tyOracle (listToBag ty_cs)
@@ -750,7 +749,7 @@ satisfiable constraints = do
                      notNull residual || -- something we cannot reason about -- gives inaccessible while it shouldn't
                      notNull expr_eqs || -- something we cannot reason about
                      notForced (fromJust bot_cs) mapping -- Was not evaluated before
-        in  return $ if answer then Just mapping
+        in  return $ if answer then Just (residual, flattenPmVarEnv mapping) -- flatten the DAG
                                else Nothing
     False -> return Nothing -- inconsistent type constraints
 
@@ -774,24 +773,11 @@ anySatValSetAbs = anySatValSetAbs' []
 
 -- | For exhaustiveness check
 -- Prune the set by removing unsatisfiable paths
-pruneValSetAbs :: ValSetAbs -> PmM ValSetAbs
-pruneValSetAbs = pruneValSetAbs' []
+pruneValSetAbs :: ValSetAbs -> PmM [(ValVecAbs,([ComplexEq], PmVarEnv))]
+-- All vectors with a satisfiable delta, along with residual constraints and the final substitution
+pruneValSetAbs = mapMaybeM sat . valSetAbsToList
   where
-    pruneValSetAbs' :: [PmConstraint] -> ValSetAbs -> PmM ValSetAbs
-    pruneValSetAbs' _cs Empty = return Empty
-    pruneValSetAbs'  cs (Union vsa1 vsa2) = do
-      mb_vsa1 <- pruneValSetAbs' cs vsa1
-      mb_vsa2 <- pruneValSetAbs' cs vsa2
-      return $ mkUnion mb_vsa1 mb_vsa2
-    pruneValSetAbs' cs Singleton = do
-      sat <- liftM isJust (satisfiable cs)
-      return $ if sat then mkConstraint cs Singleton -- always leave them at the end
-                      else Empty
-    pruneValSetAbs' cs (Constraint cs' vsa)
-      = pruneValSetAbs' (cs' ++ cs) vsa -- in front for faster concatenation
-    pruneValSetAbs' cs (Cons va vsa) = do
-      mb_vsa <- pruneValSetAbs' cs vsa
-      return $ mkCons va mb_vsa
+    sat (vec, cs) = liftM (liftM (vec,)) $ satisfiable cs
 
 -- It checks whether a set of type constraints is satisfiable.
 tyOracle :: Bag EvVar -> PmM Bool
@@ -1149,36 +1135,22 @@ divergent _usupply _gvsa []              (Cons _ _) = panic "divergent: length m
 %************************************************************************
 -}
 
-pprUncovered :: [([ValAbs],[PmConstraint])] -> SDoc
-pprUncovered vsa = vcat (map pprOne vsa)
-  where
-    pprOne (vs, cs) = ppr vs <+> ptext (sLit "|>") <+> ppr cs
-
 instance Outputable PmConstraint where
   ppr (TmConstraint x expr) = ppr x <+> equals <+> ppr expr
   ppr (TyConstraint theta)  = pprSet $ map idType theta
   ppr (BtConstraint x)      = braces (ppr x <+> ptext (sLit "~") <+> ptext (sLit "_|_"))
 
-instance Outputable (PmPat abs) where
-  ppr (GBindAbs pats expr)          = ppr pats <+> ptext (sLit "<-") <+> ppr expr
-  ppr (ConAbs { cabs_con  = con
-              , cabs_args = args }) = sep [ppr con, pprWithParens args]
-  ppr (VarAbs x)                    = ppr x
-  ppr (LitAbs l)                    = ppr l
+instance Outputable (PmPat 'V {- abs-} ) where
+  ppr = ppr . valAbsToPmExpr
 
+-- REMOVE THIS INSTANCE? WHY DO WE NEED IT?
 instance Outputable ValSetAbs where
   ppr = pprValSetAbs
-
-pprWithParens :: [PmPat abs] -> SDoc
-pprWithParens pats = sep (map paren_if_needed pats)
-  where paren_if_needed p | ConAbs { cabs_args = args } <- p, not (null args)  = parens (ppr p)
-                          | GBindAbs ps _               <- p, not (null ps)    = parens (ppr p)
-                          | LitAbs l                    <- p, isNegatedPmLit l = parens (ppr p)
-                          | otherwise = ppr p
 
 pprValSetAbs :: ValSetAbs -> SDoc
 pprValSetAbs = hang (ptext (sLit "Set:")) 2 . vcat . map print_vec . valSetAbsToList
   where
+    print_vec :: ([ValAbs],[PmConstraint]) -> SDoc
     print_vec (vec, cs) =
       let (ty_cs, tm_cs, bots) = splitConstraints cs
       in  hang (ptext (sLit "vector:") <+> ppr vec <+> ptext (sLit "|>")) 2 $
@@ -1187,6 +1159,37 @@ pprValSetAbs = hang (ptext (sLit "Set:")) 2 . vcat . map print_vec . valSetAbsTo
                  , ptext (sLit "bottoms:") <+> ppr bots ]
 
 pprSet :: Outputable id => [id] -> SDoc
-pprSet lits = braces $ sep $ punctuate comma $ map ppr lits
+pprSet = braces . sep . punctuate comma . map ppr
 
+pprUncovered :: [(ValVecAbs,([ComplexEq], PmVarEnv))] -> [SDoc]
+pprUncovered missing = map pprOne missing
+  where
+
+    prepValVecAbs :: PmVarEnv -> ValVecAbs -> [PmExpr]
+    prepValVecAbs env = map (getValuePmExpr env . valAbsToPmExpr)
+
+    ppr_constraint :: (SDoc,[PmLit]) -> SDoc
+    ppr_constraint (var, lits) = var <+> ptext (sLit "is not one of") <+> ppr lits
+
+    pprOne :: (ValVecAbs,([ComplexEq], PmVarEnv)) -> SDoc
+    pprOne (vs,(complex, subst)) =
+      let lit_cs :: [PmNegLitCt]
+          lit_cs = filterComplex complex
+
+          prepped_vector :: [PmExpr]
+          prepped_vector = prepValVecAbs subst vs
+
+          vss :: [SDoc] -- Pretty printed patterns
+          cs  :: [(SDoc,[PmLit])] -- lit-constraints for the involved variables
+          (vss, cs) = runPmPprM (mapM pprPmExprWithParens prepped_vector) lit_cs
+
+          vector :: SDoc -- the vector as a whole
+          vector = fsep vss
+
+          additional_info :: [SDoc]
+          additional_info = map ppr_constraint cs
+
+      in  if null additional_info
+            then vector
+            else hang vector 4 (ptext (sLit "where") <+> vcat additional_info)
 

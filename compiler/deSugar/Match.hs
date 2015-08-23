@@ -1025,8 +1025,9 @@ dsPmWarn dflags ctx@(DsMatchContext kind loc) mPmResult -- (redundant, inaccessi
       vcat (map (ppr_eqn f kind) (take maximum_output qs)) $$ dots qs
 
     pprEqnsU qs = pp_context ctx (ptext (sLit "are non-exhaustive")) $ \_ ->
-      hang (ptext (sLit "Patterns not matched:")) 4
-           (pprUncovered qs)
+      let us = pprUncovered qs
+      in  hang (ptext (sLit "Patterns not matched:")) 4
+               (vcat (take maximum_output us) $$ dots us)
 
 dots :: [a] -> SDoc
 dots qs = if qs `lengthExceeds` maximum_output then ptext (sLit "...") else empty
