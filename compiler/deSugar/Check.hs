@@ -29,22 +29,21 @@ import BasicTypes
 import Outputable
 import FastString
 
--- For the new checker (We need to remove and reorder things)
-import DsMonad ( DsM, initTcDsForSolver, getDictsDs)
-import TcSimplify( tcCheckSatisfiability )
-import TcType ( toTcType, toTcTypeBag )
+import DsMonad    -- DsM, initTcDsForSolver, getDictsDs
+import TcSimplify -- tcCheckSatisfiability
+import TcType     -- toTcType, toTcTypeBag
 import Bag
 import ErrUtils
 import MonadUtils -- MonadIO
-import Var (EvVar)
+import Var        -- EvVar
 import Type
 import UniqSupply
+import DsGRHSs    -- isTrueLHsExpr
 
-import Data.List (find)
-import Data.Maybe (isJust)
-import Control.Monad (liftM, liftM3, forM)
-import Data.Maybe (isNothing, fromJust)
-import DsGRHSs (isTrueLHsExpr)
+import Data.List     -- find
+import Data.Maybe    -- isJust
+import Control.Monad -- liftM3, forM
+import Data.Maybe    -- isNothing, fromJust
 
 {-
 This module checks pattern matches for:
@@ -764,7 +763,7 @@ anySatValSetAbs = anySatValSetAbs' []
     anySatValSetAbs' :: [PmConstraint] -> ValSetAbs -> PmM Bool
     anySatValSetAbs' _cs Empty                = return False
     anySatValSetAbs'  cs (Union vsa1 vsa2)    = anySatValSetAbs' cs vsa1 `orM` anySatValSetAbs' cs vsa2
-    anySatValSetAbs'  cs Singleton            = liftM isJust (satisfiable cs)
+    anySatValSetAbs'  cs Singleton            = isJust <$> satisfiable cs
     anySatValSetAbs'  cs (Constraint cs' vsa) = anySatValSetAbs' (cs' ++ cs) vsa -- in front for faster concatenation
     anySatValSetAbs'  cs (Cons _va vsa)       = anySatValSetAbs' cs vsa
 
@@ -777,7 +776,7 @@ pruneValSetAbs :: ValSetAbs -> PmM [(ValVecAbs,([ComplexEq], PmVarEnv))]
 -- All vectors with a satisfiable delta, along with residual constraints and the final substitution
 pruneValSetAbs = mapMaybeM sat . valSetAbsToList
   where
-    sat (vec, cs) = liftM (liftM (vec,)) $ satisfiable cs
+    sat (vec, cs) = ((vec,)<$>) <$> satisfiable cs
 
 -- It checks whether a set of type constraints is satisfiable.
 tyOracle :: Bag EvVar -> PmM Bool
@@ -1164,32 +1163,19 @@ pprSet = braces . sep . punctuate comma . map ppr
 pprUncovered :: [(ValVecAbs,([ComplexEq], PmVarEnv))] -> [SDoc]
 pprUncovered missing = map pprOne missing
   where
-
-    prepValVecAbs :: PmVarEnv -> ValVecAbs -> [PmExpr]
-    prepValVecAbs env = map (getValuePmExpr env . valAbsToPmExpr)
-
     ppr_constraint :: (SDoc,[PmLit]) -> SDoc
     ppr_constraint (var, lits) = var <+> ptext (sLit "is not one of") <+> ppr lits
 
     pprOne :: (ValVecAbs,([ComplexEq], PmVarEnv)) -> SDoc
     pprOne (vs,(complex, subst)) =
-      let lit_cs :: [PmNegLitCt]
-          lit_cs = filterComplex complex
+      let expr_vec = map (getValuePmExpr subst . valAbsToPmExpr) vs -- vec as a list of expressions (apply the subst returned by the solver,  ValAbs <: PmExpr)
+          sdoc_vec = mapM pprPmExprWithParens expr_vec
+          (vec,cs) = runPmPprM sdoc_vec (filterComplex complex)
 
-          prepped_vector :: [PmExpr]
-          prepped_vector = prepValVecAbs subst vs
+          printed_vec    = fsep vec
+          printed_lit_cs = map ppr_constraint cs
 
-          vss :: [SDoc] -- Pretty printed patterns
-          cs  :: [(SDoc,[PmLit])] -- lit-constraints for the involved variables
-          (vss, cs) = runPmPprM (mapM pprPmExprWithParens prepped_vector) lit_cs
-
-          vector :: SDoc -- the vector as a whole
-          vector = fsep vss
-
-          additional_info :: [SDoc]
-          additional_info = map ppr_constraint cs
-
-      in  if null additional_info
-            then vector
-            else hang vector 4 (ptext (sLit "where") <+> vcat additional_info)
+          result | null printed_lit_cs = printed_vec -- there are no literal constraints
+                 | otherwise           = hang printed_vec 4 (ptext (sLit "where") <+> vcat printed_lit_cs)
+      in  result
 

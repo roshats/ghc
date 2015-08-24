@@ -8,14 +8,20 @@
 {-# LANGUAGE CPP #-}
 
 module TmOracle
-( PmExpr(..), PmLit(..), PmVarEnv, TmOracleEnv, ComplexEq
-, isNotPmExprOther, isPmExprEq, isNegatedPmLit, isFalsePmExpr
-, hsExprToPmExpr, lhsExprToPmExpr
+( PmExpr(..), PmLit(..), PmVarEnv, ComplexEq, PmNegLitCt
+, hsExprToPmExpr
+, lhsExprToPmExpr
+, isNotPmExprOther
+, pmLitType
 , tmOracle
-, pmLitType, notForced, falsePmExpr, isConsDataCon
-
-, runPmPprM, pprPmExpr, pprPmExprWithParens, PmPprM, filterComplex, getValuePmExpr, flattenPmVarEnv, PmNegLitCt
-) where -- you have to export less stuff
+, notForced
+, flattenPmVarEnv
+, falsePmExpr
+, getValuePmExpr
+, filterComplex
+, runPmPprM
+, pprPmExprWithParens
+) where
 
 #include "HsVersions.h"
 
@@ -40,7 +46,6 @@ import Control.Monad.Trans.State.Lazy
 import Control.Monad.Trans.Except
 import Control.Monad.Trans.Class (lift)
 import qualified Data.Map as Map
-import Data.Map (Map)
 
 {-
 %************************************************************************
@@ -97,14 +102,6 @@ instance Eq PmLit where
   PmOLit b1 l1 == PmOLit b2 l2 = b1 == b2 && l1 == l2
   _ == _ = False
 
-instance Outputable PmLit where
-  ppr (PmLit      l) = pmPprHsLit l
-  ppr (PmOLit neg l) = (if neg then char '-' else empty) <> ppr l
-
--- not really useful for pmexprs per se
-instance Outputable PmExpr where
-  ppr e = fst $ runPmPprM (pprPmExpr e) []
-
 isNotPmExprOther :: PmExpr -> Bool
 isNotPmExprOther (PmExprOther _) = False
 isNotPmExprOther _expr           = True
@@ -149,7 +146,7 @@ type Failure = ComplexEq
 -- eliminates a variable, we end up with a DAG. If there were loops, the
 -- algorithm would also loop (we do not inspect function calls that may be
 -- recursive so there is not termination problem at the moment).
-type PmVarEnv = Map Id PmExpr
+type PmVarEnv = Map.Map Id PmExpr
 
 type TmOracleEnv = ([ComplexEq], PmVarEnv) -- The first is the things we cannot solve (HsExpr, overloading rubbish, etc.)
 
@@ -172,7 +169,6 @@ liftTmOracleM f = do
 
 addUnhandledEqs :: [ComplexEq] -> TmOracleM ()
 addUnhandledEqs eqs = modify (first (eqs++))
--- (map toComplex eqs++))
 
 -- | Not actually a ComplexEq, we just wrap it with a PmExprVar
 toComplex :: SimpleEq -> ComplexEq
@@ -270,7 +266,7 @@ idSubstPmExpr fn e =
                         -- PmExprOther. See NOTE [PmExprOther in PmExpr]
 
 -- ----------------------------------------------------------------------------
--- | Substituting in term equalities
+-- | Substitution in term equalities
 
 idSubstVarEq :: (Id -> Id) -> VarEq -> VarEq
 idSubstVarEq fn (x, y) = (fn x, fn y)
@@ -530,46 +526,15 @@ flattenPmVarEnv env = Map.map (getValuePmExpr env) env
 --     that it is not e but rather e', since it may perform some
 --     simplifications deeper.
 
--- {-
--- %************************************************************************
--- %*                                                                      *
--- \subsection{Something more incremental for the term oracle maybe??}
--- %*                                                                      *
--- %************************************************************************
--- -}
--- 
--- emptyPmVarEnv :: PmVarEnv
--- emptyPmVarEnv = Map.empty
--- 
--- solveVarEqI :: VarEq -> PmVarEnv -> Maybe PmVarEnv
--- solveVarEqI (x,y) env =
---   case (Map.lookup x env, Map.lookup y env) of
---     (Nothing, Nothing) -> Just $ Map.insert x (PmExprVar y) env
---     (Just ex, Nothing) -> Just $ Map.insert y ex            env
---     (Nothing, Just ey) -> Just $ Map.insert x ey            env
---     (Just ex, Just ey) -> solveComplexEqI (ex,ey) env
--- 
--- solveSimpleEqI :: SimpleEq -> PmVarEnv -> Maybe PmVarEnv
--- solveSimpleEqI (x, e) env =
---   case Map.lookup x env of
---     Nothing -> Just $ Map.insert x e env
---     Just ex -> solveComplexEqI (e,ex) env
--- 
--- solveComplexEqI :: ComplexEq -> PmVarEnv -> Maybe PmVarEnv
--- solveComplexEqI (e1,e2) env = undefined {- Actual Work -}
-
-
 -- -----------------------------------------------------------------------
 -- | Transform source expressions (HsExpr Id) to PmExpr
 
 -- | We lose information but we have to abstract over it
 -- to get the results we want. Impossible to play with HsSyn
 
--- The best thing we can do
 lhsExprToPmExpr :: LHsExpr Id -> PmExpr
 lhsExprToPmExpr (L _ e) = hsExprToPmExpr e
 
--- The best thing we can do
 hsExprToPmExpr :: HsExpr Id -> PmExpr
 
 hsExprToPmExpr (HsVar         x) = PmExprVar x
@@ -598,52 +563,31 @@ hsExprToPmExpr e@(ExplicitList _elem_ty mb_ol elems)
 hsExprToPmExpr (ExplicitPArr _elem_ty elems)
   = PmExprCon (parrFakeCon (length elems)) (map lhsExprToPmExpr elems)
 
-hsExprToPmExpr e@(RecordCon     _ _ _) = PmExprOther e -- HAS TO BE HANDLED -- SIMILAR TO TRANSLATION OF RECORD PATTERNS
-                                                       -- hsExprToPmExpr (RecordCon (Located id) PostTcExpr (HsRecordBinds id)
+-- Try and handle this case, it will look like a constructor pattern
+-- hsExprToPmExpr e@(RecordCon     _ _ _) = PmExprOther e
+
 hsExprToPmExpr (HsTick            _ e) = lhsExprToPmExpr e
 hsExprToPmExpr (HsBinTick       _ _ e) = lhsExprToPmExpr e
 hsExprToPmExpr (HsTickPragma      _ e) = lhsExprToPmExpr e
-hsExprToPmExpr (HsSCC             _ e) = lhsExprToPmExpr e -- Drop the additional info (what to do with it?)
-hsExprToPmExpr (HsCoreAnn         _ e) = lhsExprToPmExpr e -- Drop the additional info (what to do with it?)
-hsExprToPmExpr (ExprWithTySig   e _ _) = lhsExprToPmExpr e -- Drop the additional info (what to do with it?)
-hsExprToPmExpr (ExprWithTySigOut  e _) = lhsExprToPmExpr e -- Drop the additional info (what to do with it?)
+hsExprToPmExpr (HsSCC             _ e) = lhsExprToPmExpr e
+hsExprToPmExpr (HsCoreAnn         _ e) = lhsExprToPmExpr e
+hsExprToPmExpr (ExprWithTySig   e _ _) = lhsExprToPmExpr e
+hsExprToPmExpr (ExprWithTySigOut  e _) = lhsExprToPmExpr e
 
--- UNHANDLED CASES
-hsExprToPmExpr e@(HsLam             _) = PmExprOther e -- Not handled
-hsExprToPmExpr e@(HsLamCase       _ _) = PmExprOther e -- Not handled
-hsExprToPmExpr e@(HsApp           _ _) = PmExprOther e -- Not handled
-hsExprToPmExpr e@(OpApp       _ _ _ _) = PmExprOther e -- Not handled
-hsExprToPmExpr e@(SectionL        _ _) = PmExprOther e -- Not handled
-hsExprToPmExpr e@(SectionR        _ _) = PmExprOther e -- Not handled
-hsExprToPmExpr e@(HsCase          _ _) = PmExprOther e -- Not handled
-hsExprToPmExpr e@(HsIf        _ _ _ _) = PmExprOther e -- Not handled
-hsExprToPmExpr e@(HsMultiIf       _ _) = PmExprOther e -- Not handled
-hsExprToPmExpr e@(HsLet           _ _) = PmExprOther e -- Not handled
-hsExprToPmExpr e@(HsDo          _ _ _) = PmExprOther e -- Not handled
-hsExprToPmExpr e@(HsBracket         _) = PmExprOther e -- Not handled
-hsExprToPmExpr e@(HsRnBracketOut  _ _) = PmExprOther e -- Not handled
-hsExprToPmExpr e@(HsTcBracketOut  _ _) = PmExprOther e -- Not handled
-hsExprToPmExpr e@(HsSpliceE       _ _) = PmExprOther e -- Not handled
-hsExprToPmExpr e@(HsQuasiQuoteE     _) = PmExprOther e -- Not handled
-hsExprToPmExpr e@(HsWrap          _ _) = PmExprOther e -- Not handled -- Can we do sth better than this?
-hsExprToPmExpr e@(HsUnboundVar      _) = PmExprOther e -- Not handled -- Have no idea about what this thing is
-hsExprToPmExpr e@(HsProc          _ _) = PmExprOther e -- Not handled
-hsExprToPmExpr e@(HsStatic          _) = PmExprOther e -- Not handled
-hsExprToPmExpr e@(ArithSeq      _ _ _) = PmExprOther e -- Not handled
-hsExprToPmExpr e@(PArrSeq         _ _) = PmExprOther e -- Not handled
-hsExprToPmExpr e@(RecordUpd _ _ _ _ _) = PmExprOther e -- Not handled
+hsExprToPmExpr e = PmExprOther e -- the rest are not handled by the oracle
 
--- IMPOSSIBLE CASES
-hsExprToPmExpr e@(HsIPVar           _) = pprPanic "hsTomPmExpr:" (ppr e)
-hsExprToPmExpr e@(HsArrApp  _ _ _ _ _) = pprPanic "hsTomPmExpr:" (ppr e)
-hsExprToPmExpr e@(HsArrForm     _ _ _) = pprPanic "hsTomPmExpr:" (ppr e)
-hsExprToPmExpr e@EWildPat              = pprPanic "hsTomPmExpr:" (ppr e)
-hsExprToPmExpr e@(EAsPat          _ _) = pprPanic "hsTomPmExpr:" (ppr e)
-hsExprToPmExpr e@(EViewPat        _ _) = pprPanic "hsTomPmExpr:" (ppr e)
-hsExprToPmExpr e@(ELazyPat          _) = pprPanic "hsTomPmExpr:" (ppr e)
-hsExprToPmExpr e@(HsType            _) = pprPanic "hsTomPmExpr:" (ppr e)
+{-
+%************************************************************************
+%*                                                                      *
+\subsection{Pretty printing}
+%*                                                                      *
+%************************************************************************
+-}
 
--- ----------------------------------------------------
+
+-- -----------------------------------------------------------------------------
+-- | Transform residual constraints in appropriate form for pretty printing
+
 type PmNegLitCt = (Id, (SDoc, [PmLit]))
 
 filterComplex :: [ComplexEq] -> [PmNegLitCt]
@@ -697,11 +641,19 @@ pprPmExpr (PmExprVar x) = do
   mb_name <- checkNegation x
   case mb_name of
     Just name -> addUsed x >> return name
-    Nothing   -> return underscore
+    Nothing   -> return $ if debugIsOn then ppr x
+                                       else underscore
 pprPmExpr (PmExprCon con args) = pprPmExprCon con args
-pprPmExpr (PmExprLit    l) = return (ppr l)
-pprPmExpr (PmExprEq    {}) = return underscore
-pprPmExpr (PmExprOther {}) = return underscore
+pprPmExpr (PmExprLit l) = return (ppr l)
+pprPmExpr (PmExprEq e1 e2)
+  | debugIsOn = do
+      e1' <- pprPmExpr e1
+      e2' <- pprPmExpr e2
+      return $ braces (e1' <+> equals <+> e2')
+  | otherwise = return underscore
+pprPmExpr (PmExprOther e)
+  | debugIsOn = return (ppr e)
+  | otherwise = return underscore
 
 needsParens :: PmExpr -> Bool
 needsParens (PmExprVar   {}) = False
@@ -710,7 +662,7 @@ needsParens (PmExprEq    {}) = False -- will become a wildcard
 needsParens (PmExprOther {}) = False -- will become a wildcard
 needsParens (PmExprCon c es)
   | isTupleDataCon c || isPArrFakeCon c
-  || isConsDataCon c || null es = False -- List: either way it will get separated (parens on the whole thing or brackets if finite)
+  || isConsDataCon c || null es = False
   | otherwise                   = True
 
 pprPmExprWithParens :: PmExpr -> PmPprM SDoc
@@ -722,12 +674,12 @@ pprPmExprCon :: DataCon -> [PmExpr] -> PmPprM SDoc
 pprPmExprCon con args
   | isTupleDataCon con = mkTuple <$> mapM pprPmExpr args
   |  isPArrFakeCon con = mkPArr  <$> mapM pprPmExpr args
-  |  isConsDataCon con = list
+  |  isConsDataCon con = pretty_list
   | dataConIsInfix con = case args of
       [x, y] -> do x' <- pprPmExprWithParens x
                    y' <- pprPmExprWithParens y
                    return (x' <+> ppr con <+> y')
-      list   -> pprPanic "pprPmExprCon:" (ppr list)
+      list   -> pprPanic "pprPmExprCon:" (ppr list) -- how can it be infix and have more than two arguments?
   | null args = return (ppr con)
   | otherwise = do args' <- mapM pprPmExprWithParens args
                    return (fsep (ppr con : args'))
@@ -736,21 +688,25 @@ pprPmExprCon con args
     mkTuple = parens     . fsep . punctuate comma
     mkPArr  = paBrackets . fsep . punctuate comma
 
-    list :: PmPprM SDoc
-    list = case isNilPmExpr (last elements) of
+    -- lazily, to be used in the list case only
+    pretty_list :: PmPprM SDoc
+    pretty_list = case isNilPmExpr (last elements) of
       True  -> brackets . fsep . punctuate comma <$> mapM pprPmExpr (init elements)
       False -> parens   . hcat . punctuate colon <$> mapM pprPmExpr elements
 
-    elements = mkLinearList args -- lazily, to be used in the list case only
+    elements = list_elements args
 
-mkLinearList :: [PmExpr] -> [PmExpr]
-mkLinearList [x,y] = x : mkLinearList' y
-mkLinearList list  = pprPanic "mkLinearList:" (ppr list)
+    list_elements [x,y]
+      | PmExprCon c es <- y,  nilDataCon == c = ASSERT (null es) [x,y]
+      | PmExprCon c es <- y, consDataCon == c = x : list_elements es
+      | otherwise = [x,y]
+    list_elements list  = pprPanic "list_elements:" (ppr list)
 
-mkLinearList' :: PmExpr -> [PmExpr]
-mkLinearList' e = case e of
-  PmExprCon c es
-    |  nilDataCon == c -> ASSERT (null es) [e]
-    | consDataCon == c -> mkLinearList es
-  _ -> [e]
+instance Outputable PmLit where
+  ppr (PmLit      l) = pmPprHsLit l
+  ppr (PmOLit neg l) = (if neg then char '-' else empty) <> ppr l
+
+-- not really useful for pmexprs per se
+instance Outputable PmExpr where
+  ppr e = fst $ runPmPprM (pprPmExpr e) []
 
