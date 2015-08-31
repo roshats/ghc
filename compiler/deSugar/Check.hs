@@ -70,97 +70,45 @@ data PmConstraint = TmConstraint Id PmExpr -- Term equalities: x ~ e
                   | TyConstraint [EvVar]   -- Type equalities
                   | BtConstraint Id        -- Strictness constraints: x ~ _|_
 
-data Abstraction = P | V   -- Used to parameterise PmPat
-
-type ValAbs  = PmPat 'V -- Value Abstraction
-type Pattern = PmPat 'P -- Pattern
-
-{-
-data PatVec = PVNil
-            | GuardCons Guard          PatVec
-            | PatCons   (PmPat PatVec) PatVec
-
-data ValueVec = VNil
-              | VCons (PmPat ValueVec) ValueVec
-
-data PmPat rec_pats
-  = ConAbs { ...
-           , cabs_args :: rec_pats }
-  | VarAbs Id
--}
-
-type PatVec    = [Pattern] -- Just a type synonym for pattern vectors ps
-type ValVecAbs = [ValAbs]  -- Just a type synonym for value   vectors as
-
--- The difference between patterns (PmPat 'P)
--- and value abstractios (PmPat 'V)
--- is that the patterns can contain guards (GBindAbs)
--- and value abstractions cannot.  Enforced with a GADT.
-
 -- The *arity* of a PatVec [p1,..,pn] is
 -- the number of p1..pn that are not Guards
 
-{-  ???
-data PmPat p = ConAbs { cabs_args :: [p] }
-             | VarAbs
+data PmPat p = PmCon { pm_con_con     :: DataCon
+                     , pm_con_arg_tys :: [Type]
+                     , pm_con_tvs     :: [TyVar]
+                     , pm_con_dicts   :: [EvVar]
+                     , pm_con_args    :: [p] }
 
-data PmGPat = Guard PatVec Expr
-            | NonGuard (PmPat PmGPat)   -- Patterns
+             | PmVar { pm_var_id      :: Id }
+             | PmLit { pm_lit_lit     :: PmLit }
 
-newtype ValAbs = VA (PmPat ValAbs)
--}
+data Pattern = PmGuard PatVec PmExpr      -- Guard Patterns
+             | NonGuard (PmPat Pattern)   -- Other Patterns
 
+newtype ValAbs = VA (PmPat ValAbs) -- Value Abstractions
 
-data PmPat :: Abstraction -> * where
-  -- Guard: P <- e (strict by default) Instead of a single P use a list [AsPat]
-  GBindAbs :: { gabs_pats :: PatVec   -- Of arity 1
-              , gabs_expr :: PmExpr } -> PmPat 'P
+type SimplePat = PmPat Pattern -- non-guard patterns
 
-  -- Constructor: K ps
-  -- The patterns ps are the ones visible in the source language
-  ConAbs :: { cabs_con     :: DataCon
-            , cabs_arg_tys :: [Type]          -- The univeral arg types, 1-1 with the universal
-                                              -- tyvars of the constructor/pattern synonym
-                                              --   Use (conLikeResTy pat_con pat_arg_tys) to get
-                                              --   the type of the pattern
-
-            , cabs_tvs     :: [TyVar]         -- Existentially bound type variables (tyvars only)
-            , cabs_dicts   :: [EvVar]         -- Ditto *coercion variables* and *dictionaries*
-            , cabs_args    :: [PmPat abs] } -> PmPat abs
-
-  -- Variable: x
-  VarAbs :: { vabs_id :: Id } -> PmPat abs
-
-  LitAbs :: { labs_lit :: PmLit } -> PmPat abs
+type PatVec    = [Pattern] -- pattern vectors
+type ValVecAbs = [ValAbs]  -- value vector abstractions
 
 -- data T a where
 --     MkT :: forall p q. (Eq p, Ord q) => p -> q -> T [p]
 -- or  MkT :: forall p q r. (Eq p, Ord q, [p] ~ r) => p -> q -> T r
 
-{- pats ::= pat1 .. patn
-   pat ::= K ex_tvs ev_vars pats arg_tys     -- K is from data type T
-                                             -- Pattern has type T ty1 .. tyn
-         | var
-         | pats <- expr       -- Arity(pats) = 1
-
-   arg_tys ::= ty1 .. tyn
--}
-
 -- Drop the guards
 coercePmPats :: PatVec -> [ValAbs]
-coercePmPats pv = map coercePmPat [ p | p <- pv, isActualPat p]
-  where
-    isActualPat :: Pattern -> Bool
-    isActualPat = (==1) . patternArity
+coercePmPats pv = [ VA (coercePmPat p) | NonGuard p <- pv]
 
-coercePmPat :: Pattern -> ValAbs
-coercePmPat (GBindAbs {}) = panic "coercePmPat: Pattern guard"
-coercePmPat (VarAbs {vabs_id  = x}) = VarAbs x
-coercePmPat (LitAbs {labs_lit = l}) = LitAbs l
-coercePmPat (ConAbs { cabs_con = con, cabs_arg_tys = arg_tys
-                    , cabs_tvs = tvs, cabs_dicts = dicts, cabs_args = args })
-  = ConAbs { cabs_con = con, cabs_arg_tys = arg_tys
-           , cabs_tvs = tvs, cabs_dicts = dicts, cabs_args = args' } -- Gadts do not support record updates :(
+coercePmPat :: PmPat Pattern -> PmPat ValAbs
+coercePmPat (PmVar { pm_var_id  = x }) = PmVar { pm_var_id  = x }
+coercePmPat (PmLit { pm_lit_lit = l }) = PmLit { pm_lit_lit = l }
+coercePmPat (PmCon { pm_con_con = con, pm_con_arg_tys = arg_tys
+                   , pm_con_tvs = tvs, pm_con_dicts = dicts
+                   , pm_con_args = args })
+  = PmCon { pm_con_con = con, pm_con_arg_tys = arg_tys
+          , pm_con_tvs = tvs, pm_con_dicts = dicts
+          , pm_con_args = args' } -- Gadts do not support record updates :(
   where
     args' = coercePmPats args
 
@@ -228,7 +176,7 @@ initial_uncovered :: [Type] -> DsM ValSetAbs
 initial_uncovered tys = do
   us <- getUniqueSupplyM
   cs <- ((:[]) . TyConstraint . bagToList) <$> getDictsDs
-  let vsa = zipWith mkPmVar (listSplitUniqSupply us) tys
+  let vsa = zipWith mkValAbsVar (listSplitUniqSupply us) tys
   return $ mkConstraint cs (foldr Cons Singleton vsa)
 
 {-
@@ -242,56 +190,56 @@ initial_uncovered tys = do
 -- -----------------------------------------------------------------------
 -- | Utilities
 
-nullaryPmConPat :: DataCon -> PmPat abs
+nullaryPmConPat :: DataCon -> Pattern
 -- Nullary data constructor and nullary type constructor
-nullaryPmConPat con = ConAbs { cabs_con = con, cabs_arg_tys = []
-                             , cabs_tvs = [], cabs_dicts = [], cabs_args = [] }
-truePmPat :: PmPat abs
+nullaryPmConPat con = NonGuard $
+  PmCon { pm_con_con = con, pm_con_arg_tys = []
+        , pm_con_tvs = [], pm_con_dicts = [], pm_con_args = [] }
+
+truePmPat :: Pattern
 truePmPat = nullaryPmConPat trueDataCon
 
--- falsePmPat :: PmPat abs
--- falsePmPat = nullaryPmConPat falseDataCon
-
-vanillaPmConPat :: DataCon -> [Type] -> [PmPat abs] -> PmPat abs
+vanillaPmConPat :: DataCon -> [Type] -> PatVec -> Pattern
 -- ADT constructor pattern => no existentials, no local constraints
-vanillaPmConPat con arg_tys args
-  = ConAbs { cabs_con = con, cabs_arg_tys = arg_tys
-           , cabs_tvs = [], cabs_dicts = [], cabs_args = args }
+vanillaPmConPat con arg_tys args = NonGuard $
+  PmCon { pm_con_con = con, pm_con_arg_tys = arg_tys
+        , pm_con_tvs = [], pm_con_dicts = [], pm_con_args = args }
 
-nilPmPat :: Type -> PmPat abs
-nilPmPat ty = ConAbs { cabs_con = nilDataCon, cabs_arg_tys = [ty]
-                     , cabs_tvs = [], cabs_dicts = [], cabs_args = [] }
+nilPmPat :: Type -> Pattern
+nilPmPat ty = NonGuard $ PmCon { pm_con_con = nilDataCon, pm_con_arg_tys = [ty]
+                               , pm_con_tvs = [], pm_con_dicts = []
+                               , pm_con_args = [] }
 
-mkListPmPat :: Type -> [PmPat abs] -> [PmPat abs] -> [PmPat abs]
-mkListPmPat ty xs ys = [ConAbs { cabs_con = consDataCon, cabs_arg_tys = [ty]
-                               , cabs_tvs = [], cabs_dicts = []
-                               , cabs_args = xs++ys }]
+mkListPmPat :: Type -> PatVec -> PatVec -> PatVec
+mkListPmPat ty xs ys = [NonGuard $ PmCon { pm_con_con = consDataCon
+                                         , pm_con_arg_tys = [ty]
+                                         , pm_con_tvs = [], pm_con_dicts = []
+                                         , pm_con_args = xs++ys }]
 
-mkLitPmPat :: HsLit -> PmPat abs
-mkLitPmPat lit = LitAbs { labs_lit = PmLit lit }
+mkLitPmPat :: HsLit -> Pattern
+mkLitPmPat lit = NonGuard $ PmLit { pm_lit_lit = PmSLit lit }
 
-mkPosLitPmPat :: HsOverLit Id -> PmPat abs
-mkPosLitPmPat lit = LitAbs { labs_lit = PmOLit False lit }
+mkPosLitPmPat :: HsOverLit Id -> Pattern
+mkPosLitPmPat lit = NonGuard $ PmLit { pm_lit_lit = PmOLit False lit }
 
-mkNegLitPmPat :: HsOverLit Id -> PmPat abs
-mkNegLitPmPat lit = LitAbs { labs_lit = PmOLit True lit }
+mkNegLitPmPat :: HsOverLit Id -> Pattern
+mkNegLitPmPat lit = NonGuard $ PmLit { pm_lit_lit = PmOLit True lit }
 
 -- -----------------------------------------------------------------------
 -- | Transform a Pat Id into a list of (PmPat Id) -- Note [Translation to PmPat]
 
 translatePat :: Pat Id -> UniqSM PatVec
 translatePat pat = case pat of
-  WildPat ty         -> (:[]) <$> mkPmVarSM ty
-  VarPat  id         -> return [VarAbs id]
+  WildPat ty         -> (:[]) <$> mkPatternVarSM ty
+  VarPat  id         -> return [idPatternVar id]
   ParPat p           -> translatePat (unLoc p)
   LazyPat p          -> translatePat (unLoc p) -- COMEHERE: We ignore laziness   for now
-
   BangPat p          -> translatePat (unLoc p) -- COMEHERE: We ignore strictness for now
                                                -- This might affect the divergence checks?
   AsPat lid p -> do
     ps <- translatePat (unLoc p)
     let [va] = coercePmPats ps -- has to be singleton
-        g    = GBindAbs [VarAbs (unLoc lid)] (valAbsToPmExpr va)
+        g    = PmGuard [idPatternVar (unLoc lid)] (valAbsToPmExpr va)
     return (ps ++ [g])
 
   SigPatOut p _ty -> translatePat (unLoc p) -- TODO: Use the signature?
@@ -299,22 +247,22 @@ translatePat pat = case pat of
   CoPat wrapper p ty -> do
     ps      <- translatePat p
     (xp,xe) <- mkPmId2FormsSM ty {- IS THIS TYPE CORRECT OR IS IT THE OPPOSITE?? -}
-    let g = GBindAbs ps $ hsExprToPmExpr $ HsWrap wrapper (unLoc xe)
+    let g = PmGuard ps $ hsExprToPmExpr $ HsWrap wrapper (unLoc xe)
     return [xp,g]
 
   -- (n + k)  ===>   x (True <- x >= k) (n <- x-k)
   NPlusKPat n k ge minus -> do
     (xp, xe) <- mkPmId2FormsSM $ idType (unLoc n)
     let ke = noLoc (HsOverLit k)         -- k as located expression
-        g1 = GBindAbs [truePmPat]        $ hsExprToPmExpr $ OpApp xe (noLoc ge)    no_fixity ke -- True <- (x >= k)
-        g2 = GBindAbs [VarAbs (unLoc n)] $ hsExprToPmExpr $ OpApp xe (noLoc minus) no_fixity ke -- n    <- (x -  k)
+        g1 = PmGuard [truePmPat]              $ hsExprToPmExpr $ OpApp xe (noLoc ge)    no_fixity ke -- True <- (x >= k)
+        g2 = PmGuard [idPatternVar (unLoc n)] $ hsExprToPmExpr $ OpApp xe (noLoc minus) no_fixity ke -- n    <- (x -  k)
     return [xp, g1, g2]
 
   -- (fun -> pat)   ===>   x (pat <- fun x)
   ViewPat lexpr lpat arg_ty -> do
     (xp,xe) <- mkPmId2FormsSM arg_ty
     ps      <- translatePat (unLoc lpat) -- p translated recursively
-    let g  = GBindAbs ps $ hsExprToPmExpr $ HsApp lexpr xe -- p <- f x
+    let g  = PmGuard ps $ hsExprToPmExpr $ HsApp lexpr xe -- p <- f x
     return [xp,g]
 
   ListPat ps ty Nothing -> do
@@ -324,7 +272,7 @@ translatePat pat = case pat of
     (xp, xe) <- mkPmId2FormsSM pat_ty
     ps       <- translatePatVec (map unLoc lpats) -- list as value abstraction
     let pats = foldr (mkListPmPat elem_ty) [nilPmPat elem_ty] ps
-        g  = GBindAbs pats $ hsExprToPmExpr $ HsApp (noLoc to_list) xe -- [...] <- toList x
+        g  = PmGuard pats $ hsExprToPmExpr $ HsApp (noLoc to_list) xe -- [...] <- toList x
     return [xp,g]
 
   ConPatOut { pat_con = L _ (PatSynCon _) } ->
@@ -333,7 +281,7 @@ translatePat pat = case pat of
     -- to   v (Just (x, y) <- matchP v (\x y -> Just (x,y)) Nothing
     -- That is, a combination of a variable pattern and a guard
     -- But there are complications with GADTs etc, and this isn't done yet
-    (:[]) <$> mkPmVarSM (hsPatType pat)
+    (:[]) <$> mkPatternVarSM (hsPatType pat)
 
   ConPatOut { pat_con     = L _ (RealDataCon con)
             , pat_arg_tys = arg_tys
@@ -341,11 +289,11 @@ translatePat pat = case pat of
             , pat_dicts   = dicts
             , pat_args    = ps } -> do
     args <- translateConPatVec arg_tys ex_tvs con ps
-    return [ConAbs { cabs_con     = con -- I wish ghc could do record update with GADTs..
-                   , cabs_arg_tys = arg_tys
-                   , cabs_tvs     = ex_tvs
-                   , cabs_dicts   = dicts
-                   , cabs_args    = args }]
+    return [ NonGuard $ PmCon { pm_con_con     = con -- I wish ghc could do record update with GADTs..
+                              , pm_con_arg_tys = arg_tys
+                              , pm_con_tvs     = ex_tvs
+                              , pm_con_dicts   = dicts
+                              , pm_con_args    = args }]
 
   NPat lit mb_neg _eq
     | Just _  <- mb_neg -> return [mkNegLitPmPat lit] -- negated literal
@@ -383,31 +331,31 @@ translateConPatVec _univ_tys _ex_tvs _ (PrefixCon ps)   = concat <$> translatePa
 translateConPatVec _univ_tys _ex_tvs _ (InfixCon p1 p2) = concat <$> translatePatVec (map unLoc [p1,p2])
 translateConPatVec  univ_tys  ex_tvs c (RecCon (HsRecFields fs _))
     -- Nothing matched. Make up some fresh term variables
-  | null fs        = mkPmVarsSM arg_tys
+  | null fs        = mkPatternVarsSM arg_tys
     -- The data constructor was not defined using record syntax. For the
     -- pattern to be in record syntax it should be empty (e.g. Just {}).
     -- So just like the previous case.
-  | null orig_lbls = ASSERT (null matched_lbls) mkPmVarsSM arg_tys
+  | null orig_lbls = ASSERT (null matched_lbls) mkPatternVarsSM arg_tys
     -- Some of the fields appear, in the original order (there may be holes).
     -- Generate a simple constructor pattern and make up fresh variables for
     -- the rest of the fields
   | matched_lbls `subsetOf` orig_lbls = ASSERT (length orig_lbls == length arg_tys)
       let translateOne (lbl, ty) = case lookup lbl matched_pats of
             Just p  -> translatePat p
-            Nothing -> mkPmVarsSM [ty]
+            Nothing -> mkPatternVarsSM [ty]
       in  concatMapM translateOne (zip orig_lbls arg_tys)
     -- The fields that appear are not in the correct order. Make up fresh
     -- variables for all fields and add guards after matching, to force the
     -- evaluation in the correct order.
   | otherwise = do
-      arg_var_pats    <- mkPmVarsSM arg_tys
+      arg_var_pats    <- mkPatternVarsSM arg_tys
       translated_pats <- forM matched_pats $ \(x,pat) -> do
         pvec <- translatePat pat
         return (x, pvec)
 
-      let zipped = zip orig_lbls [ x | VarAbs x <- arg_var_pats ] -- [(Name, Id)]
+      let zipped = zip orig_lbls [ x | NonGuard (PmVar x) <- arg_var_pats ] -- [(Name, Id)]
           guards = map (\(name,pvec) -> case lookup name zipped of
-                            Just x  -> GBindAbs pvec (PmExprVar x)
+                            Just x  -> PmGuard pvec (PmExprVar x)
                             Nothing -> panic "translateConPatVec: lookup")
                        translated_pats
 
@@ -451,19 +399,20 @@ translateGuards guards = do
   all_guards <- concat <$> mapM translateGuard guards
 
   let any_unhandled = or [ not (solvable pv expr)
-                         | GBindAbs pv expr <- all_guards ]
+                         | PmGuard pv expr <- all_guards ]
   if any_unhandled
     then do
-      let fake_pats = GBindAbs [truePmPat] (PmExprOther EWildPat)
-      return $ (fake_pats : [ p | p@(GBindAbs pv e) <- all_guards, solvable pv e ]) -- all must be GBindAbs
+      let fake_pats = PmGuard [truePmPat] (PmExprOther EWildPat)
+      return $ (fake_pats : [ p | p@(PmGuard pv e) <- all_guards, solvable pv e ]) -- all must be GBindAbs
     else return all_guards
 
   where
     solvable :: PatVec -> PmExpr -> Bool
     solvable pv expr
-      | [p] <- pv, VarAbs {} <- p = True  -- Binds to variable? We don't branch (Y)
-      | isNotPmExprOther expr     = True  -- The expression is "normal"? We branch but we want that
-      | otherwise                 = False -- Otherwise it branches without being useful
+      | [p] <- pv
+      , NonGuard (PmVar {}) <- p = True  -- Binds to variable? We don't branch (Y)
+      | isNotPmExprOther expr    = True  -- The expression is "normal"? We branch but we want that
+      | otherwise                = False -- Otherwise it branches without being useful
 -- | Should have been (but is too expressive):
 -- translateGuards guards = concat <$> mapM translateGuard guards
 
@@ -486,7 +435,7 @@ translateBind :: LPat Id -> LHsExpr Id -> UniqSM PatVec
 translateBind (L _ p) e = do
   ps <- translatePat p
   let expr = lhsExprToPmExpr e
-  return [GBindAbs ps expr]
+  return [PmGuard ps expr]
 
 translateBoolGuard :: LHsExpr Id -> UniqSM PatVec
 translateBoolGuard e
@@ -494,7 +443,7 @@ translateBoolGuard e
     -- The formal thing to do would be to generate (True <- True)
     -- but it is trivial to solve so instead we give back an empty
     -- PatVec for efficiency
-  | otherwise = return [GBindAbs [truePmPat] (lhsExprToPmExpr e)]
+  | otherwise = return [PmGuard [truePmPat] (lhsExprToPmExpr e)]
 
 {-
 %************************************************************************
@@ -547,18 +496,23 @@ getUniqueSupplyM3 = liftM3 (,,) getUniqueSupplyM getUniqueSupplyM getUniqueSuppl
 -- ----------------------------------------------------------------------------
 -- | Basic utilities
 
+valAbsType  :: ValAbs -> Type
+valAbsType (VA va) = pmPatType va
+
+patternType :: Pattern -> Type
+patternType (PmGuard pv e) = ASSERT (patVecArity pv == 1) (patternType p)
+  where Just p = find ((==1) . patternArity) pv
+patternType (NonGuard pat) = pmPatType pat
+
 -- | Get the type out of a PmPat. For guard patterns (ps <- e) we use the type
 -- of the first (or the single -WHEREVER IT IS- valid to use?) pattern
-pmPatType :: PmPat abs -> Type
-pmPatType (GBindAbs { gabs_pats = pats })
-  = ASSERT (patVecArity pats == 1) (pmPatType p)
-  where Just p = find ((==1) . patternArity) pats
-pmPatType (ConAbs { cabs_con = con, cabs_arg_tys = tys })
-  = mkTyConApp (dataConTyCon con) tys
-pmPatType (VarAbs { vabs_id  = x }) = idType x
-pmPatType (LitAbs { labs_lit = l }) = pmLitType l
+pmPatType :: PmPat p -> Type
+pmPatType (PmCon { pm_con_con = con, pm_con_arg_tys = tys })
+                                     = mkTyConApp (dataConTyCon con) tys
+pmPatType (PmVar { pm_var_id  = x }) = idType x
+pmPatType (PmLit { pm_lit_lit = l }) = pmLitType l
 
-mkOneConFull :: Id -> UniqSupply -> DataCon -> (ValAbs, [PmConstraint])
+mkOneConFull :: Id -> UniqSupply -> DataCon -> (PmPat ValAbs, [PmConstraint])
 --  *  x :: T tys, where T is an algebraic data type
 --     NB: in the case of a data familiy, T is the *representation* TyCon
 --     e.g.   data instance T (a,b) = T1 a b
@@ -593,20 +547,19 @@ mkOneConFull x usupply con = (con_abs, constraints)
 
     arguments  = mkConVars usupply2 (substTys subst arg_tys)      -- Constructor arguments (value abstractions)
     theta_cs   = substTheta subst (eqSpecPreds eq_spec ++ thetas) -- All the constraints bound by the constructor
+    evvars     = zipWith (nameType "oneCon") (listSplitUniqSupply usupply3) theta_cs
+    con_abs    = PmCon { pm_con_con     = con
+                       , pm_con_arg_tys = tc_args
+                       , pm_con_tvs     = ex_tvs'
+                       , pm_con_dicts   = evvars
+                       , pm_con_args    = arguments }
 
-    evvars = zipWith (nameType "oneCon") (listSplitUniqSupply usupply3) theta_cs
-    con_abs    = ConAbs { cabs_con     = con
-                        , cabs_arg_tys = tc_args
-                        , cabs_tvs     = ex_tvs'
-                        , cabs_dicts   = evvars
-                        , cabs_args    = arguments }
-
-    constraints = [ TmConstraint x (valAbsToPmExpr con_abs)
+    constraints = [ TmConstraint x (pmPatToPmExpr con_abs)
                   , TyConstraint evvars ] -- Both term and type constraints
 
 mkConVars :: UniqSupply -> [Type] -> [ValAbs] -- ys, fresh with the given type
-mkConVars usupply tys = map (uncurry mkPmVar) $
-  zip (listSplitUniqSupply usupply) tys
+mkConVars us tys = zipWith mkValAbsVar (listSplitUniqSupply us) tys
+
 
 tailValSetAbs :: ValSetAbs -> ValSetAbs
 tailValSetAbs Empty               = Empty
@@ -615,14 +568,15 @@ tailValSetAbs (Union vsa1 vsa2)   = tailValSetAbs vsa1 `mkUnion` tailValSetAbs v
 tailValSetAbs (Constraint cs vsa) = cs `mkConstraint` tailValSetAbs vsa
 tailValSetAbs (Cons _ vsa)        = vsa -- actual work
 
-wrapK :: DataCon -> ValSetAbs -> ValSetAbs
-wrapK con = wrapK_aux (dataConSourceArity con) emptylist
+-- update this (pass the additional (type-related) arguments)
+wrapK :: DataCon -> [Type] -> [TyVar] -> [EvVar] -> ValSetAbs -> ValSetAbs
+wrapK con arg_tys ex_tvs dicts = wrapK_aux (dataConSourceArity con) emptylist
   where
     wrapK_aux :: Int -> DList ValAbs -> ValSetAbs -> ValSetAbs
     wrapK_aux _ _    Empty               = Empty
-    wrapK_aux 0 args vsa                 = ConAbs { cabs_con = con, cabs_arg_tys = [] {- SHOULD THESE BE EMPTY? -}
-                                                  , cabs_tvs = [], cabs_dicts = []
-                                                  , cabs_args = toList args } `mkCons` vsa
+    wrapK_aux 0 args vsa                 = VA (PmCon { pm_con_con  = con, pm_con_arg_tys = arg_tys
+                                                     , pm_con_tvs  = ex_tvs, pm_con_dicts = dicts
+                                                     , pm_con_args = toList args }) `mkCons` vsa
     wrapK_aux _ _    Singleton           = panic "wrapK: Singleton"
     wrapK_aux n args (Cons vs vsa)       = wrapK_aux (n-1) (args `snoc` vs) vsa
     wrapK_aux n args (Constraint cs vsa) = cs `mkConstraint` wrapK_aux n args vsa
@@ -662,11 +616,17 @@ mkCons :: ValAbs -> ValSetAbs -> ValSetAbs
 mkCons _ Empty = Empty
 mkCons va vsa  = Cons va vsa
 
+-- needs VA
 valAbsToPmExpr :: ValAbs -> PmExpr
-valAbsToPmExpr (ConAbs { cabs_con  = c
-                       , cabs_args = ps }) = PmExprCon c (map valAbsToPmExpr ps)
-valAbsToPmExpr (VarAbs x)                  = PmExprVar x
-valAbsToPmExpr (LitAbs l)                  = PmExprLit l
+valAbsToPmExpr (VA va) = pmPatToPmExpr va
+
+pmPatToPmExpr :: PmPat ValAbs -> PmExpr
+pmPatToPmExpr (PmCon { pm_con_con  = c
+                     , pm_con_args = ps }) = PmExprCon c (map valAbsToPmExpr ps)
+pmPatToPmExpr (PmVar { pm_var_id   = x  }) = PmExprVar x
+pmPatToPmExpr (PmLit { pm_lit_lit  = l  }) = PmExprLit l
+
+
 
 no_fixity :: a -- CHECKME: Can we retrieve the fixity from the operator name?
 no_fixity = panic "Check: no fixity"
@@ -675,14 +635,23 @@ no_fixity = panic "Check: no fixity"
 allConstructors :: DataCon -> [DataCon]
 allConstructors = tyConDataCons . dataConTyCon
 
-mkPmVar :: UniqSupply -> Type -> PmPat abs
-mkPmVar usupply ty = VarAbs (mkPmId usupply ty)
+mkPmVar :: UniqSupply -> Type -> PmPat p
+mkPmVar usupply ty = PmVar (mkPmId usupply ty)
 
-mkPmVarSM :: Type -> UniqSM (PmPat abs)
-mkPmVarSM ty = flip mkPmVar ty <$> getUniqueSupplyM
+idPatternVar :: Id -> Pattern
+idPatternVar x = NonGuard (PmVar x)
 
-mkPmVarsSM :: [Type] -> UniqSM [PmPat abs]
-mkPmVarsSM tys = mapM mkPmVarSM tys
+mkPatternVar :: UniqSupply -> Type -> Pattern
+mkPatternVar us ty = NonGuard (mkPmVar us ty)
+
+mkValAbsVar :: UniqSupply -> Type -> ValAbs
+mkValAbsVar us ty = VA (mkPmVar us ty)
+
+mkPatternVarSM :: Type -> UniqSM Pattern
+mkPatternVarSM ty = flip mkPatternVar ty <$> getUniqueSupplyM
+
+mkPatternVarsSM :: [Type] -> UniqSM PatVec
+mkPatternVarsSM tys = mapM mkPatternVarSM tys
 
 mkPmId :: UniqSupply -> Type -> Id
 mkPmId usupply ty = mkLocalId name ty
@@ -691,11 +660,11 @@ mkPmId usupply ty = mkLocalId name ty
     occname = mkVarOccFS (fsLit (show unique))
     name    = mkInternalName unique occname noSrcSpan
 
-mkPmId2FormsSM :: Type -> UniqSM (PmPat abs, LHsExpr Id)
+mkPmId2FormsSM :: Type -> UniqSM (Pattern, LHsExpr Id)
 mkPmId2FormsSM ty = do
   us <- getUniqueSupplyM
   let x = mkPmId us ty
-  return (VarAbs x, noLoc (HsVar x))
+  return (idPatternVar x, noLoc (HsVar x))
 
 -- -----------------------------------------------------------------------
 -- | Types and constraints
@@ -812,10 +781,8 @@ patVecArity :: PatVec -> PmArity
 patVecArity = sum . map patternArity
 
 patternArity :: Pattern -> PmArity
-patternArity (GBindAbs {}) = 0
-patternArity (ConAbs   {}) = 1
-patternArity (VarAbs   {}) = 1
-patternArity (LitAbs   {}) = 1
+patternArity (PmGuard  {}) = 0
+patternArity (NonGuard {}) = 1
 
 -- -- Should get a default value because an empty set has any arity
 -- -- (We have no value vector abstractions to see)
@@ -860,271 +827,218 @@ patVectProc (vec,gvs) vsa = do
 -- ----------------------------------------------------------------------------
 -- | Main function 1 (covered)
 
---THE SECOND ARGUMENT IS THE CONT, WHAT TO PLUG AT THE END (GUARDS)
-covered :: UniqSupply -> ValSetAbs -> PatVec -> ValSetAbs -> ValSetAbs
+pmTraverse :: UniqSupply
+           -> ValSetAbs -- gvsa
+           -> PmMatcher -- what to do
+           -> PatVec
+           -> ValSetAbs
+           -> ValSetAbs
+pmTraverse us gvsa rec _vec   Empty               = Empty
+pmTraverse us gvsa rec []     Singleton           = gvsa
+pmTraverse us gvsa rec []     (Cons _ _)          = panic "pmTraverse: length mismatch: cons"
+pmTraverse us gvsa rec vec    (Union vsa1 vsa2)   = mkUnion (pmTraverse us1 gvsa rec vec vsa1)
+                                                            (pmTraverse us2 gvsa rec vec vsa2)
+                                                    where (us1, us2) = splitUniqSupply us
+pmTraverse us gvsa rec vec    (Constraint cs vsa) = mkConstraint cs (pmTraverse us gvsa rec vec vsa)
+pmTraverse us gvsa rec (p:ps) vsa =
+  case p of
+    PmGuard pv e -> pmTraverseGuard us gvsa rec (patternType p) pv e ps vsa
+    NonGuard pat
+      | Cons (VA va) vsa <- vsa -> rec us gvsa pat ps va vsa
+      | otherwise               -> panic "pmTraverse: length mismatch: singleton" -- can't be anything else
 
--- CEmpty (New case because of representation)
-covered _usupply _gvsa _vec Empty = Empty
+pmTraverseGuard :: UniqSupply
+                -> ValSetAbs -- gvsa
+                -> PmMatcher -- what to do
+                -> Type -> PatVec -> PmExpr -> PatVec -- pattern vector in parts
+                -> ValSetAbs
+                -> ValSetAbs
+pmTraverseGuard us gvsa rec ty pv expr ps vsa
+  = mkConstraint cs $ tailValSetAbs $ pmTraverse us2 gvsa rec (pv++ps) (VA (PmVar y) `mkCons` vsa)
+  where (us1, us2) = splitUniqSupply us
+        y  = mkPmId us1 ty
+        cs = [TmConstraint y expr]
 
--- CNil
-covered _usupply gvsa [] Singleton = gvsa
+type PmMatcher =  UniqSupply
+               -> ValSetAbs
+               -> PmPat Pattern -> PatVec -- pattern vector head and tail
+               -> PmPat ValAbs  -> ValSetAbs -- value set abstraction head and tail
+               -> ValSetAbs
 
--- Pure induction (New case because of representation)
-covered usupply gvsa vec (Union vsa1 vsa2)
-  = covered usupply1 gvsa vec vsa1 `mkUnion` covered usupply2 gvsa vec vsa2
-  where (usupply1, usupply2) = splitUniqSupply usupply
-
--- Pure induction (New case because of representation)
-covered usupply gvsa vec (Constraint cs vsa)
-  = cs `mkConstraint` covered usupply gvsa vec vsa
-
--- CGuard
-covered usupply gvsa (pat@(GBindAbs p e) : ps) vsa
-  = cs `mkConstraint` (tailValSetAbs $ covered usupply2 gvsa (p++ps) (VarAbs y `mkCons` vsa))
-  where
-    (usupply1, usupply2) = splitUniqSupply usupply
-    y  = mkPmId usupply1 (pmPatType pat)
-    cs = [TmConstraint y e]
-
+cMatcher :: PmMatcher
 -- CVar
-covered usupply gvsa (VarAbs x : ps) (Cons va vsa)
-  = va `mkCons` (cs `mkConstraint` covered usupply gvsa ps vsa)
-  where cs = [TmConstraint x (valAbsToPmExpr va)]
+cMatcher us gvsa (PmVar x) ps va vsa
+  = VA va `mkCons` (cs `mkConstraint` covered us gvsa ps vsa)
+  where cs = [TmConstraint x (pmPatToPmExpr va)]
 
--- | CLitCon | --
-covered usupply gvsa ((LitAbs { labs_lit = l }) : ps)
-                     (Cons cabs@(ConAbs {}) vsa)
-  | PmOLit {} <- l = cabs `mkCons` (cs `mkConstraint` covered usupply2 gvsa ps vsa)
-  | otherwise      = panic "covered: CLitCon"
+-- CLitCon
+cMatcher us gvsa (PmLit l) ps (va@(PmCon {})) vsa
+  = VA va `mkCons` (cs `mkConstraint` covered us2 gvsa ps vsa)
   where
-    (usupply1, usupply2) = splitUniqSupply usupply
-    y  = mkPmId usupply1 (pmPatType cabs)
+    (us1, us2) = splitUniqSupply us
+    y  = mkPmId us1 (pmPatType va)
     cs = [ TmConstraint y (PmExprLit l)
-         , TmConstraint y (valAbsToPmExpr cabs) ]
+         , TmConstraint y (pmPatToPmExpr va) ]
 
 -- | CConLit | --
-covered usupply gvsa (cabs@(ConAbs { cabs_con = con }) : ps)
-                     (Cons lit_abs@(LitAbs l) vsa)
-  | PmOLit {} <- l = covered usupply3 gvsa (cabs : ps) (con_abs `mkCons` (cs `mkConstraint` vsa))
-  | otherwise      = panic "covered: CConLit"
+cMatcher us gvsa (p@(PmCon {})) ps (PmLit l) vsa
+  = cMatcher us3 gvsa p ps con_abs (mkConstraint cs vsa)
   where
-    (usupply1, usupply2, usupply3) = splitUniqSupply3 usupply
-    y                 = mkPmId usupply1 (pmPatType cabs)
-    (con_abs, all_cs) = mkOneConFull y usupply2 con
-    cs = TmConstraint y (valAbsToPmExpr lit_abs) : all_cs
+    (us1, us2, us3)   = splitUniqSupply3 us
+    y                 = mkPmId us1 (pmPatType p)
+    (con_abs, all_cs) = mkOneConFull y us2 (pm_con_con p)
+    cs = TmConstraint y (PmExprLit l) : all_cs
 
 -- CConCon
-covered usupply gvsa (ConAbs { cabs_con = c1, cabs_args = args1 } : ps)
-               (Cons (ConAbs { cabs_con = c2, cabs_args = args2 }) vsa)
+cMatcher us gvsa (p@(PmCon { pm_con_con = c1, pm_con_args = args1 })) ps
+                    (PmCon { pm_con_con = c2, pm_con_args = args2 }) vsa
   | c1 /= c2  = Empty
-  | otherwise = wrapK c1 (covered usupply gvsa (args1 ++ ps) (foldr mkCons vsa args2))
+  | otherwise = wrapK c1 (pm_con_arg_tys p)
+                         (pm_con_tvs     p)
+                         (pm_con_dicts   p)
+                         (covered us gvsa (args1 ++ ps) (foldr mkCons vsa args2))
 
--- | CLitLit | --
-covered usupply gvsa    (LitAbs { labs_lit = l1 } : ps)
-               (Cons va@(LitAbs { labs_lit = l2 }) vsa)
+-- CLitLit
+cMatcher us gvsa (PmLit l1) ps (va@(PmLit l2)) vsa
   | l1 /= l2  = Empty
-  | otherwise = va `mkCons` covered usupply gvsa ps vsa
+  | otherwise = VA va `mkCons` covered us gvsa ps vsa
 
 -- CConVar
-covered usupply gvsa (cabs@(ConAbs { cabs_con = con }) : ps) (Cons (VarAbs x) vsa)
-  = covered usupply2 gvsa (cabs : ps) (con_abs `mkCons` (all_cs `mkConstraint` vsa))
+cMatcher us gvsa (p@(PmCon { pm_con_con = con })) ps (PmVar x) vsa
+  = cMatcher us2 gvsa p ps con_abs (mkConstraint all_cs vsa)
   where
-    (usupply1, usupply2) = splitUniqSupply usupply
-    (con_abs, all_cs)    = mkOneConFull x usupply1 con -- if cs empty do not do it
+    (us1, us2)        = splitUniqSupply us
+    (con_abs, all_cs) = mkOneConFull x us1 con
 
 -- | CLitVar | --
-covered usupply gvsa (lpat@(LitAbs { labs_lit = lit }) : ps) (Cons (VarAbs x) vsa)
-  = covered usupply gvsa (lpat : ps) (lit_abs `mkCons` (cs `mkConstraint` vsa))
+cMatcher us gvsa (p@(PmLit l)) ps (PmVar x) vsa
+  = cMatcher us gvsa p ps lit_abs (mkConstraint cs vsa)
   where
-    lit_abs = LitAbs { labs_lit = lit }
-    cs      = [TmConstraint x (PmExprLit lit)]
+    lit_abs = PmLit l
+    cs      = [TmConstraint x (PmExprLit l)]
 
-covered _usupply _gvsa (ConAbs {} : _) Singleton  = panic "covered: length mismatch: constructor-sing"
-covered _usupply _gvsa (VarAbs _  : _) Singleton  = panic "covered: length mismatch: variable-sing"
-covered _usupply _gvsa (LitAbs {} : _) Singleton  = panic "covered: length mismatch: literal-sing"
-covered _usupply _gvsa []              (Cons _ _) = panic "covered: length mismatch: Cons"
 
--- ----------------------------------------------------------------------------
--- | Main function 2 (uncovered)
 
-uncovered :: UniqSupply -> ValSetAbs -> PatVec -> ValSetAbs -> ValSetAbs
-
--- UEmpty (New case because of representation)
-uncovered _usupply _gvsa _vec Empty = Empty
-
--- UNil
-uncovered _usupply gvsa [] Singleton = gvsa
-
--- Pure induction (New case because of representation)
-uncovered usupply gvsa vec (Union vsa1 vsa2)
-  = uncovered usupply1 gvsa vec vsa1 `mkUnion` uncovered usupply2 gvsa vec vsa2
-  where (usupply1, usupply2) = splitUniqSupply usupply
-
--- Pure induction (New case because of representation)
-uncovered usupply gvsa vec (Constraint cs vsa)
-  = cs `mkConstraint` uncovered usupply gvsa vec vsa
-
--- UGuard
-uncovered usupply gvsa (pat@(GBindAbs p e) : ps) vsa
-  = cs `mkConstraint` (tailValSetAbs $ uncovered usupply2 gvsa (p++ps) (VarAbs y `mkCons` vsa))
-  where
-    (usupply1, usupply2) = splitUniqSupply usupply
-    y  = mkPmId usupply1 (pmPatType pat)
-    cs = [TmConstraint y e]
+uMatcher :: PmMatcher
 
 -- UVar
-uncovered usupply gvsa (VarAbs x : ps) (Cons va vsa)
-  = va `mkCons` (cs `mkConstraint` uncovered usupply gvsa ps vsa)
-  where cs = [TmConstraint x (valAbsToPmExpr va)]
+uMatcher us gvsa (PmVar x) ps va vsa
+  = VA va `mkCons` (cs `mkConstraint` uncovered us gvsa ps vsa)
+  where cs = [TmConstraint x (pmPatToPmExpr va)]
 
--- | ULitCon | --
-uncovered usupply gvsa (LitAbs { labs_lit = lit } : ps)
-                       (Cons cabs@(ConAbs {}) vsa)
-  = uncovered usupply2 gvsa (VarAbs y : ps) (mkCons cabs (mkConstraint cs vsa))
+-- ULitCon
+uMatcher us gvsa (PmLit l) ps (va@(PmCon {})) vsa
+  = uMatcher us2 gvsa (PmVar y) ps va (mkConstraint cs vsa)
   where
-    (usupply1, usupply2) = splitUniqSupply usupply
-    y  = mkPmId usupply1 (pmPatType cabs)
-    cs = [TmConstraint y (PmExprLit lit)]
+    (us1, us2) = splitUniqSupply us
+    y  = mkPmId us1 (pmPatType va)
+    cs = [TmConstraint y (PmExprLit l)]
 
 -- | UConLit | --
-uncovered usupply gvsa (cabs@(ConAbs {}) : ps)
-                       (Cons va@(LitAbs {}) vsa)
-  = uncovered usupply2 gvsa (cabs : ps) (mkCons (VarAbs y) (mkConstraint cs vsa))
+uMatcher us gvsa (p@(PmCon {})) ps (PmLit l) vsa
+  = uMatcher us2 gvsa p ps (PmVar y) (mkConstraint cs vsa)
   where
-    (usupply1, usupply2) = splitUniqSupply usupply
-    y  = mkPmId usupply1 (pmPatType cabs)
-    cs = [TmConstraint y (valAbsToPmExpr va)]
+    (us1, us2) = splitUniqSupply us
+    y  = mkPmId us1 (pmPatType p)
+    cs = [TmConstraint y (PmExprLit l)]
 
 -- UConCon
-uncovered usupply gvsa (ConAbs { cabs_con = c1, cabs_args = args1 } : ps)
-            (Cons cabs@(ConAbs { cabs_con = c2, cabs_args = args2 }) vsa)
-  | c1 /= c2  = cabs `mkCons` vsa
-  | otherwise = wrapK c1 (uncovered usupply gvsa (args1 ++ ps) (foldr mkCons vsa args2))
+uMatcher us gvsa ( p@(PmCon { pm_con_con = c1, pm_con_args = args1 })) ps
+                 (va@(PmCon { pm_con_con = c2, pm_con_args = args2 })) vsa
+  | c1 /= c2  = VA va `mkCons` vsa
+  | otherwise = wrapK c1 (pm_con_arg_tys p)
+                         (pm_con_tvs     p)
+                         (pm_con_dicts   p)
+                         (uncovered us gvsa (args1 ++ ps) (foldr mkCons vsa args2))
 
--- | ULitLit | --
-uncovered usupply gvsa (LitAbs { labs_lit = l1 } : ps)
-                       (Cons va@(LitAbs { labs_lit = l2 }) vsa)
-  | l1 /= l2  = va `mkCons` vsa
-  | otherwise = va `mkCons` uncovered usupply gvsa ps vsa
+-- ULitLit
+uMatcher us gvsa (PmLit l1) ps (va@(PmLit l2)) vsa
+  | l1 /= l2  = VA va `mkCons` vsa
+  | otherwise = VA va `mkCons` uncovered us gvsa ps vsa
 
 -- UConVar
-uncovered usupply gvsa (cabs@(ConAbs { cabs_con = con }) : ps) (Cons (VarAbs x) vsa)
-  = uncovered usupply2 gvsa (cabs : ps) inst_vsa -- instantiated vsa [x \mapsto K_j ys]
+uMatcher us gvsa (p@(PmCon { pm_con_con = con })) ps (PmVar x) vsa
+  = uncovered us2 gvsa (NonGuard p : ps) inst_vsa -- instantiated vsa [x \mapsto K_j ys]
   where
     -- Some more uniqSupplies
-    (usupply1, usupply2) = splitUniqSupply usupply
+    (us1, us2) = splitUniqSupply us
 
     -- Unfold the variable to all possible constructor patterns
-    uniqs_cons = listSplitUniqSupply usupply1 `zip` allConstructors con
-    cons_cs    = map (uncurry (mkOneConFull x)) uniqs_cons
-    add_one (va,cs) valset = valset `mkUnion` (va `mkCons` (cs `mkConstraint` vsa))
+    cons_cs    = zipWith (mkOneConFull x) (listSplitUniqSupply us1) (allConstructors con)
+    add_one (va,cs) valset = valset `mkUnion` (VA va `mkCons` (cs `mkConstraint` vsa))
     inst_vsa   = foldr add_one Empty cons_cs
 
--- | ULitVar | --
-uncovered usupply gvsa (labs@(LitAbs { labs_lit = lit }) : ps)
-                       (Cons (VarAbs x) vsa)
-  = mkUnion (uncovered usupply2 gvsa (labs : ps) (LitAbs lit `mkCons` (match_cs `mkConstraint` vsa))) -- matching case
-            (non_match_cs `mkConstraint` (VarAbs x `mkCons` vsa))                       -- non-matching case
+-- ULitVar
+uMatcher us gvsa (p@(PmLit l)) ps (PmVar x) vsa
+  = mkUnion (uMatcher us2 gvsa p ps (PmLit l) (mkConstraint match_cs vsa)) -- matching case
+            (non_match_cs `mkConstraint` (VA (PmVar x) `mkCons` vsa))      -- non-matching case
   where
-    (usupply1, usupply2) = splitUniqSupply usupply
-
-    y  = mkPmId usupply1 (pmPatType labs)
-
-    match_cs     = [ TmConstraint x (PmExprLit lit)]
+    (us1, us2) = splitUniqSupply us
+    y  = mkPmId us1 (pmPatType p)
+    match_cs     = [ TmConstraint x (PmExprLit l)]
     non_match_cs = [ TmConstraint y falsePmExpr
-                   , TmConstraint y (PmExprEq (PmExprVar x) (PmExprLit lit)) ]
+                   , TmConstraint y (PmExprEq (PmExprVar x) (PmExprLit l)) ]
 
-uncovered _usupply _gvsa (ConAbs {} : _) Singleton  = panic "uncovered: length mismatch: constructor-sing"
-uncovered _usupply _gvsa (VarAbs _  : _) Singleton  = panic "uncovered: length mismatch: variable-sing"
-uncovered _usupply _gvsa (LitAbs {} : _) Singleton  = panic "uncovered: length mismatch: literal-sing"
-uncovered _usupply _gvsa []              (Cons _ _) = panic "uncovered: length mismatch: Cons"
 
--- ----------------------------------------------------------------------------
--- | Main function 3 (divergent)
-
-divergent :: UniqSupply -> ValSetAbs -> PatVec -> ValSetAbs -> ValSetAbs
-
--- DEmpty (New case because of representation)
-divergent _usupply _gvsa _vec Empty = Empty
-
--- DNil
-divergent _usupply gvsa [] Singleton = gvsa
-
--- Pure induction (New case because of representation)
-divergent usupply gvsa vec (Union vsa1 vsa2) = divergent usupply1 gvsa vec vsa1 `mkUnion` divergent usupply2 gvsa vec vsa2
-  where (usupply1, usupply2) = splitUniqSupply usupply
-
--- Pure induction (New case because of representation)
-divergent usupply gvsa vec (Constraint cs vsa) = cs `mkConstraint` divergent usupply gvsa vec vsa
-
--- DGuard
-divergent usupply gvsa (pat@(GBindAbs p e) : ps) vsa
-  = cs `mkConstraint` (tailValSetAbs $ divergent usupply2 gvsa (p++ps) (VarAbs y `mkCons` vsa))
-  where
-    (usupply1, usupply2) = splitUniqSupply usupply
-    y  = mkPmId usupply1 (pmPatType pat)
-    cs = [TmConstraint y e]
+dMatcher :: PmMatcher
 
 -- DVar
-divergent usupply gvsa (VarAbs x : ps) (Cons va vsa)
-  = va `mkCons` (cs `mkConstraint` divergent usupply gvsa ps vsa)
-  where cs = [TmConstraint x (valAbsToPmExpr va)]
+dMatcher us gvsa (PmVar x) ps va vsa
+  = VA va `mkCons` (cs `mkConstraint` divergent us gvsa ps vsa)
+  where cs = [TmConstraint x (pmPatToPmExpr va)]
 
--- | DLitCon | --
-divergent usupply gvsa ((LitAbs { labs_lit = l }) : ps)
-                       (Cons cabs@(ConAbs {}) vsa)
-  | PmOLit {} <- l = cabs `mkCons` (cs `mkConstraint` divergent usupply2 gvsa ps vsa)
-  | otherwise      = panic "divergent: DLitCon"
+-- DLitCon
+dMatcher us gvsa (PmLit l) ps (va@(PmCon {})) vsa
+  = VA va  `mkCons` (cs `mkConstraint` divergent us2 gvsa ps vsa)
   where
-    (usupply1, usupply2) = splitUniqSupply usupply
-    y  = mkPmId usupply1 (pmPatType cabs)
+    (us1, us2) = splitUniqSupply us
+    y  = mkPmId us1 (pmPatType va)
     cs = [ TmConstraint y (PmExprLit l)
-         , TmConstraint y (valAbsToPmExpr cabs) ]
+         , TmConstraint y (pmPatToPmExpr va) ]
 
--- | DConLit | --
+-- DConLit
 -- IT WILL LOOK LIKE FORCED AT FIRST BUT I HOPE THE SOLVER FIXES THIS
-divergent usupply gvsa (cabs@(ConAbs { cabs_con = con }) : ps)
-                       (Cons lit_abs@(LitAbs l) vsa)
-  | PmOLit {} <- l = divergent usupply3 gvsa (cabs : ps) (con_abs `mkCons` (cs `mkConstraint` vsa))
-  | otherwise      = panic "divergent: DConLit"
+dMatcher us gvsa (p@(PmCon { pm_con_con = con })) ps (PmLit l) vsa
+  = dMatcher us3 gvsa p ps con_abs (mkConstraint cs vsa)
   where
-    (usupply1, usupply2, usupply3) = splitUniqSupply3 usupply
-    y                 = mkPmId usupply1 (pmPatType cabs)
-    (con_abs, all_cs) = mkOneConFull y usupply2 con
-    cs = TmConstraint y (valAbsToPmExpr lit_abs) : all_cs
+    (us1, us2, us3)   = splitUniqSupply3 us
+    y                 = mkPmId us1 (pmPatType p)
+    (con_abs, all_cs) = mkOneConFull y us2 con
+    cs = TmConstraint y (PmExprLit l) : all_cs
 
 -- DConCon
-divergent usupply gvsa (ConAbs { cabs_con = c1, cabs_args = args1 } : ps)
-                 (Cons (ConAbs { cabs_con = c2, cabs_args = args2 }) vsa)
+dMatcher us gvsa (p@(PmCon { pm_con_con = c1, pm_con_args = args1 })) ps
+                    (PmCon { pm_con_con = c2, pm_con_args = args2 }) vsa
   | c1 /= c2  = Empty
-  | otherwise = wrapK c1 (divergent usupply gvsa (args1 ++ ps) (foldr mkCons vsa args2))
+  | otherwise = wrapK c1 (pm_con_arg_tys p)
+                         (pm_con_tvs     p)
+                         (pm_con_dicts   p)
+                         (divergent us gvsa (args1 ++ ps) (foldr mkCons vsa args2))
 
--- | DLitLit | --
-divergent usupply gvsa (LitAbs { labs_lit = l1 } : ps)
-                       (Cons va@(LitAbs { labs_lit = l2 }) vsa)
+-- DLitLit
+dMatcher us gvsa (PmLit l1) ps (va@(PmLit l2)) vsa
   | l1 /= l2  = Empty
-  | otherwise = va `mkCons` divergent usupply gvsa ps vsa
+  | otherwise = VA va `mkCons` divergent us gvsa ps vsa
 
--- DConVar [NEEDS WORK]
-divergent usupply gvsa (cabs@(ConAbs { cabs_con = con }) : ps) (Cons (VarAbs x) vsa)
-  = mkUnion (VarAbs x `mkCons` mkConstraint [BtConstraint x] vsa)
-            (divergent usupply2 gvsa (cabs : ps) (con_abs `mkCons` (all_cs `mkConstraint` vsa)))
+-- DConVar
+dMatcher us gvsa (p@(PmCon { pm_con_con = con })) ps (PmVar x) vsa
+  = mkUnion (VA (PmVar x) `mkCons` mkConstraint [BtConstraint x] vsa)
+            (dMatcher us2 gvsa p ps con_abs (mkConstraint all_cs vsa))
   where
-    (usupply1, usupply2) = splitUniqSupply usupply
-    (con_abs, all_cs)    = mkOneConFull x usupply1 con -- if cs empty do not do it
+    (us1, us2)        = splitUniqSupply us
+    (con_abs, all_cs) = mkOneConFull x us1 con
 
--- | DLitVar | --
-divergent usupply gvsa (lpat@(LitAbs { labs_lit = lit }) : ps) (Cons (VarAbs x) vsa)
-  = mkUnion (VarAbs x `mkCons` mkConstraint [BtConstraint x] vsa)
-            (divergent usupply gvsa (lpat : ps) (lit_abs `mkCons` (cs `mkConstraint` vsa)))
+-- DLitVar
+dMatcher us gvsa (PmLit l) ps (PmVar x) vsa
+  = mkUnion (VA (PmVar x) `mkCons` mkConstraint [BtConstraint x] vsa)
+            (dMatcher us gvsa (PmLit l) ps (PmLit l) (mkConstraint cs vsa))
   where
-    lit_abs = LitAbs { labs_lit = lit }
-    cs      = [TmConstraint x (PmExprLit lit)]
+    cs = [TmConstraint x (PmExprLit l)]
 
-divergent _usupply _gvsa (ConAbs {} : _) Singleton  = panic "divergent: length mismatch: constructor-sing"
-divergent _usupply _gvsa (VarAbs _  : _) Singleton  = panic "divergent: length mismatch: variable-sing"
-divergent _usupply _gvsa (LitAbs {} : _) Singleton  = panic "divergent: length mismatch: literal-sing"
-divergent _usupply _gvsa []              (Cons _ _) = panic "divergent: length mismatch: Cons"
+covered, uncovered, divergent :: UniqSupply -> ValSetAbs -> PatVec -> ValSetAbs -> ValSetAbs
+covered   us gvsa vec vsa = pmTraverse us gvsa cMatcher vec vsa
+uncovered us gvsa vec vsa = pmTraverse us gvsa uMatcher vec vsa
+divergent us gvsa vec vsa = pmTraverse us gvsa dMatcher vec vsa
 
 {-
 %************************************************************************
@@ -1139,7 +1053,7 @@ instance Outputable PmConstraint where
   ppr (TyConstraint theta)  = pprSet $ map idType theta
   ppr (BtConstraint x)      = braces (ppr x <+> ptext (sLit "~") <+> ptext (sLit "_|_"))
 
-instance Outputable (PmPat 'V {- abs-} ) where
+instance Outputable ValAbs where
   ppr = ppr . valAbsToPmExpr
 
 -- REMOVE THIS INSTANCE? WHY DO WE NEED IT?

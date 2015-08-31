@@ -94,11 +94,11 @@ data PmExpr = PmExprVar   Id
             | PmExprEq    PmExpr PmExpr  -- Syntactic equality
             | PmExprOther (HsExpr Id)    -- NOTE [PmExprOther in PmExpr]
 
-data PmLit = PmLit  HsLit
-           | PmOLit Bool {- is it negated? -} (HsOverLit Id)
+data PmLit = PmSLit HsLit                                    -- simple
+           | PmOLit Bool {- is it negated? -} (HsOverLit Id) -- overloaded
 
 instance Eq PmLit where
-  PmLit     l1 == PmLit l2     = l1 == l2
+  PmSLit    l1 == PmSLit l2    = l1 == l2
   PmOLit b1 l1 == PmOLit b2 l2 = b1 == b2 && l1 == l2
   _ == _ = False
 
@@ -111,7 +111,7 @@ isNegatedPmLit (PmOLit b _) = b
 isNegatedPmLit _other_lit   = False
 
 pmLitType :: PmLit -> Type
-pmLitType (PmLit    lit) = hsLitType   lit
+pmLitType (PmSLit   lit) = hsLitType   lit
 pmLitType (PmOLit _ lit) = overLitType lit
 
 isConsDataCon :: DataCon -> Bool
@@ -424,7 +424,7 @@ certainlyEqual e1 e2 =
 
     eqLit :: PmLit -> PmLit -> PmExpr
     eqLit l1 l2 = case (l1, l2) of
-      (PmLit {}, PmLit {})
+      (PmSLit {}, PmSLit {})
         | l1 == l2  -> truePmExpr
         | otherwise -> falsePmExpr
       (PmOLit {}, PmOLit {})
@@ -539,7 +539,7 @@ hsExprToPmExpr :: HsExpr Id -> PmExpr
 
 hsExprToPmExpr (HsVar         x) = PmExprVar x
 hsExprToPmExpr (HsOverLit  olit) = PmExprLit (PmOLit False olit)
-hsExprToPmExpr (HsLit       lit) = PmExprLit (PmLit lit)
+hsExprToPmExpr (HsLit       lit) = PmExprLit (PmSLit lit)
 
 hsExprToPmExpr e@(NegApp _ neg_e)
   | PmExprLit (PmOLit False ol) <- hsExprToPmExpr neg_e = PmExprLit (PmOLit True ol)
@@ -703,7 +703,7 @@ pprPmExprCon con args
     list_elements list  = pprPanic "list_elements:" (ppr list)
 
 instance Outputable PmLit where
-  ppr (PmLit      l) = pmPprHsLit l
+  ppr (PmSLit     l) = pmPprHsLit l
   ppr (PmOLit neg l) = (if neg then char '-' else empty) <> ppr l
 
 -- not really useful for pmexprs per se
