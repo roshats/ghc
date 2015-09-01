@@ -21,6 +21,9 @@ module TmOracle
 , filterComplex
 , runPmPprM
 , pprPmExprWithParens
+
+-- Incremental version
+, solveSimplesIncr, initialIncrState
 ) where
 
 #include "HsVersions.h"
@@ -709,4 +712,25 @@ instance Outputable PmLit where
 -- not really useful for pmexprs per se
 instance Outputable PmExpr where
   ppr e = fst $ runPmPprM (pprPmExpr e) []
+
+
+-- ----------------------------------------------------------------------------
+
+initialIncrState :: ([ComplexEq], TmOracleEnv)
+initialIncrState = ([], ([], Map.empty))
+
+solveSimplesIncr :: ([ComplexEq], TmOracleEnv) -- residual & previous state
+                 -> [SimpleEq]                 -- what to solve
+                 -> Either Failure ([ComplexEq], TmOracleEnv)
+solveSimplesIncr (residual, (unhandled, mapping)) simples
+  =  runExcept (runStateT result (unhandled, mapping))
+  where
+    complex = map (applySubstSimpleEq mapping) simples ++ residual
+    result  = prepComplexEqM complex >>= iterateComplex
+
+applySubstSimpleEq :: PmVarEnv -> SimpleEq -> ComplexEq
+applySubstSimpleEq env (x,e2)
+  = case Map.lookup x env of
+      Just e1 -> (e1,          getValuePmExpr env e2)
+      Nothing -> (PmExprVar x, getValuePmExpr env e2)
 
