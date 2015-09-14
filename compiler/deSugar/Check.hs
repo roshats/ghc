@@ -7,7 +7,7 @@
 
 {-# LANGUAGE CPP #-}
 
-module Check ( toTcTypeBag, pprUncovered, checkSingle, checkMatches, PmResult ) where
+module Check ( toTcTypeBag, pprUncovered, checkSingle, checkMatches, PmResult, hsCaseTmCt ) where
 
 #include "HsVersions.h"
 
@@ -156,9 +156,10 @@ checkMatches tys matches
 initial_uncovered :: [Type] -> DsM ValSetAbs
 initial_uncovered tys = do
   us <- getUniqueSupplyM
-  cs <- TyConstraint . bagToList <$> getDictsDs
+  ty_cs <- TyConstraint . bagToList <$> getDictsDs
+  tm_cs <- map (uncurry TmConstraint) . bagToList <$> getTmCsDs
   let vsa = zipWith mkValAbsVar (listSplitUniqSupply us) tys
-  return $ mkConstraint [cs] (foldr Cons Singleton vsa)
+  return $ mkConstraint (ty_cs:tm_cs) (foldr Cons Singleton vsa)
 
 {-
 %************************************************************************
@@ -620,6 +621,9 @@ mkPatternVarSM ty = flip mkPatternVar ty <$> getUniqueSupplyM
 mkPatternVarsSM :: [Type] -> UniqSM PatVec
 mkPatternVarsSM tys = mapM mkPatternVarSM tys
 
+mkPmIdSM :: Type -> UniqSM Id
+mkPmIdSM ty = flip mkPmId ty <$> getUniqueSupplyM
+
 mkPmId :: UniqSupply -> Type -> Id
 mkPmId usupply ty = mkLocalId name ty
   where
@@ -1070,4 +1074,20 @@ pprOne (vs,(complex, subst)) =
   in  if null cs
         then fsep vec -- there are no literal constraints
         else hang (fsep vec) 4 $ ptext (sLit "where") <+> vcat (map ppr_constraint cs)
+
+
+-- ----------------------------------------------------------------------------
+
+hsCaseTmCt :: Maybe (LHsExpr Id) -- scrutinee
+           -> [Pat Id]           -- match (should have length 1)
+           -> [Type]             -- types of patterns (should have length 1)
+           -> DsM (Bag SimpleEq)
+hsCaseTmCt Nothing _ _ = return emptyBag
+hsCaseTmCt (Just scr) [p] [ty] = liftUs $ do
+  [e] <- map valAbsToPmExpr . coercePmPats <$> translatePat p
+  let scr_e = lhsExprToPmExpr scr
+  var <- mkPmIdSM ty
+  return $ listToBag [(var, e), (var, scr_e)]
+hsCaseTmCt _ _ _ = panic "hsCaseTmCt: HsCase"
+
 

@@ -31,8 +31,8 @@ module DsMonad (
 
         DsMetaEnv, DsMetaVal(..), dsGetMetaEnv, dsLookupMetaEnv, dsExtendMetaEnv,
 
-        -- getting and setting EvVars in local environment
-        getDictsDs, addDictsDs,
+        -- Getting and setting EvVars and term constraints in local environment
+        getDictsDs, addDictsDs, getTmCsDs, addTmCsDs,
 
         -- Warnings
         DsWarning, warnDs, failWithDs, discardWarningsDs,
@@ -56,6 +56,7 @@ import HscTypes
 import Bag
 import DataCon
 import TyCon
+import PmExpr
 import Id
 import Module
 import Outputable
@@ -271,8 +272,8 @@ mkDsEnvs dflags mod rdr_env type_env fam_inst_env msg_var static_binds_var
                            }
         lcl_env = DsLclEnv { dsl_meta  = emptyNameEnv
                            , dsl_loc   = real_span
-                           , dsl_dicts = emptyBag -- maybe use a *smart* constructor?
-
+                           , dsl_dicts = emptyBag
+                           , dsl_tm_cs = emptyBag
                            }
     in (gbl_env, lcl_env)
 
@@ -340,6 +341,13 @@ getDictsDs = do { env <- getLclEnv; return (dsl_dicts env) }
 addDictsDs :: Bag EvVar -> DsM a -> DsM a
 addDictsDs ev_vars
   = updLclEnv (\env -> env { dsl_dicts = unionBags ev_vars (dsl_dicts env) })
+
+getTmCsDs :: DsM (Bag SimpleEq)
+getTmCsDs = do { env <- getLclEnv; return (dsl_tm_cs env) }
+
+addTmCsDs :: Bag SimpleEq -> DsM a -> DsM a
+addTmCsDs tm_cs
+  = updLclEnv (\env -> env { dsl_tm_cs = unionBags tm_cs (dsl_tm_cs env) })
 
 getSrcSpanDs :: DsM SrcSpan
 getSrcSpanDs = do { env <- getLclEnv

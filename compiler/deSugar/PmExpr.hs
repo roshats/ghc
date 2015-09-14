@@ -28,13 +28,12 @@ module PmExpr (
         filterComplex, runPmPprM, pprPmExprWithParens,
 
         -- Misc
-        truePmExpr, falsePmExpr, toComplex, pmLitType
+        truePmExpr, falsePmExpr, toComplex
     ) where
 
 #include "HsVersions.h"
 
 import Type
-import TcHsSyn
 import HsSyn
 import Id
 import DataCon
@@ -47,7 +46,6 @@ import BasicTypes (boxityNormalTupleSort)
 import FastString -- sLit
 import VarSet
 
-import Control.Arrow (first)
 import Data.Maybe (mapMaybe)
 import Data.List (groupBy, sortBy, nub)
 import Control.Monad.Trans.State.Lazy
@@ -126,13 +124,9 @@ truePmExpr = PmExprCon trueDataCon []
 falsePmExpr :: PmExpr
 falsePmExpr = PmExprCon falseDataCon []
 
-pmLitType :: PmLit -> Type
-pmLitType (PmSLit   lit) = hsLitType   lit
-pmLitType (PmOLit _ lit) = overLitType lit
-
 -- | Not actually a ComplexEq, we just wrap it with a PmExprVar
 toComplex :: SimpleEq -> ComplexEq
-toComplex = first PmExprVar
+toComplex (x,e) = (PmExprVar x, e)
 
 -- ----------------------------------------------------------------------------
 -- | Partitioning equalities (VarEq, SimpleEq, ComplexEq and Unhandled Eqs)

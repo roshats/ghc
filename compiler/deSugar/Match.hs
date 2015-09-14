@@ -19,6 +19,7 @@ import HsSyn
 import TcHsSyn
 import TcEvidence
 import TcRnMonad
+import PmExpr
 import Check
 import CoreSyn
 import Literal
@@ -660,6 +661,7 @@ Call @match@ with all of this information!
 -}
 
 matchWrapper :: HsMatchContext Name         -- For shadowing warning messages
+             -> Maybe (LHsExpr Id)          -- The scrutinee, if we check a case
              -> MatchGroup Id (LHsExpr Id)  -- Matches being desugared
              -> DsM ([Id], CoreExpr)        -- Results
 
@@ -687,10 +689,10 @@ one pattern, and match simply only accepts one pattern.
 JJQC 30-Nov-1997
 -}
 
-matchWrapper ctxt (MG { mg_alts = matches
-                      , mg_arg_tys = arg_tys
-                      , mg_res_ty = rhs_ty
-                      , mg_origin = origin })
+matchWrapper ctxt mb_scr (MG { mg_alts = matches
+                             , mg_arg_tys = arg_tys
+                             , mg_res_ty = rhs_ty
+                             , mg_origin = origin })
   = do  { dflags <- getDynFlags
         ; locn   <- getSrcSpanDs
 
@@ -709,7 +711,11 @@ matchWrapper ctxt (MG { mg_alts = matches
     mk_eqn_info (L _ (Match pats _ grhss))
       = do { let upats  = map unLoc pats
                  dicts  = toTcTypeBag (collectEvVarsPats upats) -- check rhs with constraints from match in scope -- Only TcTyVars
-           ; match_result <- addDictsDs dicts $ dsGRHSs ctxt upats grhss rhs_ty
+
+           ; tm_cs <- hsCaseTmCt mb_scr upats arg_tys
+           ; match_result <- addDictsDs dicts $
+                               addTmCsDs tm_cs $
+                                 dsGRHSs ctxt upats grhss rhs_ty
            ; return (EqnInfo { eqn_pats = upats, eqn_rhs  = match_result}) }
 
     -- not sure if it is needed anymore (does `matchEquations' generate any other warning?)

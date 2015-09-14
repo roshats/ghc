@@ -117,6 +117,7 @@ import TcType
 import Annotations
 import InstEnv
 import FamInstEnv
+import PmExpr
 import IOEnv
 import RdrName
 import Name
@@ -302,7 +303,8 @@ instance ContainsModule DsGblEnv where
 data DsLclEnv = DsLclEnv {
         dsl_meta    :: DsMetaEnv,        -- Template Haskell bindings
         dsl_loc     :: RealSrcSpan,      -- To put in pattern-matching error msgs
-        dsl_dicts   :: Bag EvVar         -- Constraints from GADT pattern-matching
+        dsl_dicts   :: Bag EvVar,        -- Constraints from GADT pattern-matching
+        dsl_tm_cs   :: Bag SimpleEq
      }
 
 -- Inside [| |] brackets, the desugarer looks

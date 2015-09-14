@@ -112,7 +112,7 @@ dsHsBind (FunBind { fun_id = L _ fun, fun_matches = matches
                   , fun_co_fn = co_fn, fun_tick = tick
                   , fun_infix = inf })
  = do   { dflags <- getDynFlags
-        ; (args, body) <- matchWrapper (FunRhs (idName fun) inf) matches
+        ; (args, body) <- matchWrapper (FunRhs (idName fun) inf) Nothing matches
         ; let body' = mkOptTickBox tick body
         ; rhs <- dsHsWrapper co_fn (mkLams args body')
         ; {- pprTrace "dsHsBind" (ppr fun <+> ppr (idInlinePragma fun)) $ -}

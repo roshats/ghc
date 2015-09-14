@@ -8,7 +8,7 @@
 {-# LANGUAGE CPP #-}
 
 module TmOracle (
-          PmExpr(..), PmLit(..), PmVarEnv, ComplexEq, PmNegLitCt,
+          PmExpr(..), PmLit(..), PmVarEnv, SimpleEq, ComplexEq, PmNegLitCt,
           hsExprToPmExpr, lhsExprToPmExpr, isNotPmExprOther,
           pmLitType, tmOracle, notForced, flattenPmVarEnv,
           falsePmExpr, getValuePmExpr, filterComplex, runPmPprM,
@@ -24,10 +24,13 @@ import PmExpr
 import Id
 import DataCon
 import TysWiredIn
+import Type    -- ( Type )
+import HsLit   -- overLitType
+import TcHsSyn -- hsLitType
 import Outputable
 import MonadUtils
-import Control.Arrow (first)
 
+import Control.Arrow (first)
 import Data.List (foldl')
 import Control.Monad.Trans.State.Lazy
 import Control.Monad.Trans.Except
@@ -396,4 +399,11 @@ applySubstSimpleEq env (x,e2)
   = case Map.lookup x env of
       Just e1 -> (e1,          getValuePmExpr env e2)
       Nothing -> (PmExprVar x, getValuePmExpr env e2)
+
+-- ----------------------------------------------------------------------------
+
+-- should be in PmExpr but generates cyclic imports :(
+pmLitType :: PmLit -> Type
+pmLitType (PmSLit   lit) = hsLitType   lit
+pmLitType (PmOLit _ lit) = overLitType lit
 
