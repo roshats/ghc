@@ -7,44 +7,28 @@
 
 {-# LANGUAGE CPP #-}
 
-module TmOracle
-( PmExpr(..), PmLit(..), PmVarEnv, ComplexEq, PmNegLitCt
-, hsExprToPmExpr
-, lhsExprToPmExpr
-, isNotPmExprOther
-, pmLitType
-, tmOracle
-, notForced
-, flattenPmVarEnv
-, falsePmExpr
-, getValuePmExpr
-, filterComplex
-, runPmPprM
-, pprPmExprWithParens
+module TmOracle (
+          PmExpr(..), PmLit(..), PmVarEnv, ComplexEq, PmNegLitCt,
+          hsExprToPmExpr, lhsExprToPmExpr, isNotPmExprOther,
+          pmLitType, tmOracle, notForced, flattenPmVarEnv,
+          falsePmExpr, getValuePmExpr, filterComplex, runPmPprM,
+          pprPmExprWithParens,
 
--- Incremental version
-, solveSimplesIncr, initialIncrState
-) where
+          -- Incremental version
+          solveSimplesIncr, initialIncrState
+    ) where
 
 #include "HsVersions.h"
 
-import Type
-import TcHsSyn
-import HsSyn
+import PmExpr
 import Id
 import DataCon
 import TysWiredIn
 import Outputable
-import Util
 import MonadUtils
 import Control.Arrow (first)
-import SrcLoc
-import BasicTypes (boxityNormalTupleSort)
-import FastString (sLit)
 
-import VarSet
-import Data.Maybe (mapMaybe)
-import Data.List (foldl', groupBy, sortBy, nub)
+import Data.List (foldl')
 import Control.Monad.Trans.State.Lazy
 import Control.Monad.Trans.Except
 import Control.Monad.Trans.Class (lift)
@@ -90,47 +74,8 @@ B. Solving Phase
 
 -}
 
--- | Lifted version of (HsExpr Id)
-data PmExpr = PmExprVar   Id
-            | PmExprCon   DataCon [PmExpr]
-            | PmExprLit   PmLit
-            | PmExprEq    PmExpr PmExpr  -- Syntactic equality
-            | PmExprOther (HsExpr Id)    -- NOTE [PmExprOther in PmExpr]
-
-data PmLit = PmSLit HsLit                                    -- simple
-           | PmOLit Bool {- is it negated? -} (HsOverLit Id) -- overloaded
-
-instance Eq PmLit where
-  PmSLit    l1 == PmSLit l2    = l1 == l2
-  PmOLit b1 l1 == PmOLit b2 l2 = b1 == b2 && l1 == l2
-  _ == _ = False
-
-isNotPmExprOther :: PmExpr -> Bool
-isNotPmExprOther (PmExprOther _) = False
-isNotPmExprOther _expr           = True
-
-isNegatedPmLit :: PmLit -> Bool
-isNegatedPmLit (PmOLit b _) = b
-isNegatedPmLit _other_lit   = False
-
-pmLitType :: PmLit -> Type
-pmLitType (PmSLit   lit) = hsLitType   lit
-pmLitType (PmOLit _ lit) = overLitType lit
-
-isConsDataCon :: DataCon -> Bool
-isConsDataCon con = consDataCon == con
-
-isNilPmExpr :: PmExpr -> Bool
-isNilPmExpr (PmExprCon c _) = c == nilDataCon
-isNilPmExpr _other_expr     = False
-
 -- ----------------------------------------------------------------------------
 -- | Oracle Types
-
--- | All different kinds of term equalities.
-type VarEq     = (Id, Id)
-type SimpleEq  = (Id, PmExpr) -- We always use this orientation
-type ComplexEq = (PmExpr, PmExpr)
 
 -- | The oracle will try and solve the wanted term constraints. If there is no
 -- problem we get back a list of residual constraints. There are 2 types of
@@ -173,10 +118,6 @@ liftTmOracleM f = do
 addUnhandledEqs :: [ComplexEq] -> TmOracleM ()
 addUnhandledEqs eqs = modify (first (eqs++))
 
--- | Not actually a ComplexEq, we just wrap it with a PmExprVar
-toComplex :: SimpleEq -> ComplexEq
-toComplex = first PmExprVar
-
 -- Extend the substitution
 addSubst :: Id -> PmExpr -> PmVarEnv -> PmVarEnv
 addSubst x e env = case Map.lookup x env of
@@ -185,35 +126,9 @@ addSubst x e env = case Map.lookup x env of
 
 -- ----------------------------------------------------------------------------
 
--- | Split a set of simple equalities (of the form x ~ expr) into equalities
--- between variables only (x ~ y) and the rest (x ~ expr, where expr not a var)
--- Also, return the equalities of the form (x ~ e), where e is an HsExpr (we cannot handle it)
-partitionSimple :: [SimpleEq] -> ([VarEq], [SimpleEq], [SimpleEq])
-partitionSimple in_cs = foldr select ([],[],[]) in_cs
-  where
-    select eq@(x,e) ~(var_eqs, other_eqs, res_eqs)
-      | PmExprVar y   <- e = ((x,y):var_eqs,    other_eqs,    res_eqs)
-      | PmExprOther _ <- e = (      var_eqs,    other_eqs, eq:res_eqs)
-      | otherwise          = (      var_eqs, eq:other_eqs,    res_eqs)
-
 partitionSimpleM :: [SimpleEq] -> TmOracleM ([VarEq], [SimpleEq])
 partitionSimpleM in_cs = addUnhandledEqs (map toComplex res_eqs) >> return (var_eqs, other_eqs)
   where (var_eqs, other_eqs, res_eqs) = partitionSimple in_cs
-
--- | Split a set of complex equalities into into the 3 categories
--- Also, return the equalities of the form (x ~ e), where e is an HsExpr (we cannot handle it)
-partitionComplex :: [ComplexEq] -> ([VarEq], [SimpleEq], [ComplexEq], [SimpleEq])
-partitionComplex in_cs = foldr select ([],[],[],[]) in_cs
-  where
-    select eq@(e1,e2) ~(var_eqs, simpl_eqs, other_eqs, res_eqs)
-      | PmExprVar x <- e1 = selectSimple x e2 (var_eqs, simpl_eqs, other_eqs, res_eqs)
-      | PmExprVar y <- e2 = selectSimple y e1 (var_eqs, simpl_eqs, other_eqs, res_eqs)
-      | otherwise         = (var_eqs, simpl_eqs, eq:other_eqs, res_eqs)
-
-    selectSimple x e ~(var_eqs, simpl_eqs, other_eqs, res_eqs)
-      | PmExprVar y   <- e = ((x,y):var_eqs,       simpl_eqs, other_eqs,       res_eqs)
-      | PmExprOther _ <- e = (      var_eqs,       simpl_eqs, other_eqs, (x,e):res_eqs)
-      | otherwise          = (      var_eqs, (x,e):simpl_eqs, other_eqs,       res_eqs)
 
 partitionComplexM :: [ComplexEq] -> TmOracleM ([VarEq], [SimpleEq], [ComplexEq])
 partitionComplexM in_cs = addUnhandledEqs (map toComplex res_eqs) >> return (var_eqs, simpl_eqs, other_eqs)
@@ -224,73 +139,6 @@ partitionComplexM in_cs = addUnhandledEqs (map toComplex res_eqs) >> return (var
 -- Non-satisfiable set of constraints
 mismatch :: ComplexEq -> TmOracleM a
 mismatch eq = lift (throwE eq)
-
--- Expressions `True' and `False'
-truePmExpr :: PmExpr
-truePmExpr = PmExprCon trueDataCon []
-
-falsePmExpr :: PmExpr
-falsePmExpr = PmExprCon falseDataCon []
-
--- Check if a PmExpression is equal to term `True' (syntactically).
-isTruePmExpr :: PmExpr -> Bool
-isTruePmExpr (PmExprCon c []) = c == trueDataCon
-isTruePmExpr _other_expr      = False
-
--- Check if a PmExpression is equal to term `False' (syntactically).
-isFalsePmExpr :: PmExpr -> Bool
-isFalsePmExpr (PmExprCon c []) = c == falseDataCon
-isFalsePmExpr _other_expr      = False
-
-isPmExprEq :: PmExpr -> Maybe (PmExpr, PmExpr)
-isPmExprEq (PmExprEq e1 e2) = Just (e1,e2)
-isPmExprEq _other_expr      = Nothing
-
--- ----------------------------------------------------------------------------
--- | Substitution for PmExpr
-
-substPmExpr :: Id -> PmExpr -> PmExpr -> PmExpr
-substPmExpr x e1 e =
-  case e of
-    PmExprVar z | x == z    -> e1
-                | otherwise -> e
-    PmExprCon c ps -> PmExprCon c (map (substPmExpr x e1) ps)
-    PmExprEq ex ey -> PmExprEq (substPmExpr x e1 ex) (substPmExpr x e1 ey)
-    _other_expr    -> e -- The rest are terminals -- we silently ignore
-                        -- PmExprOther. See NOTE [PmExprOther in PmExpr]
-
-idSubstPmExpr :: (Id -> Id) -> PmExpr -> PmExpr
-idSubstPmExpr fn e =
-  case e of
-    PmExprVar z    -> PmExprVar (fn z)
-    PmExprCon c es -> PmExprCon c (map (idSubstPmExpr fn) es)
-    PmExprEq e1 e2 -> PmExprEq (idSubstPmExpr fn e1) (idSubstPmExpr fn e2)
-    _other_expr    -> e -- The rest are terminals -- we silently ignore
-                        -- PmExprOther. See NOTE [PmExprOther in PmExpr]
-
--- ----------------------------------------------------------------------------
--- | Substitution in term equalities
-
-idSubstVarEq :: (Id -> Id) -> VarEq -> VarEq
-idSubstVarEq fn (x, y) = (fn x, fn y)
-
-idSubstSimpleEq :: (Id -> Id) -> SimpleEq -> SimpleEq
-idSubstSimpleEq fn (x,e) = (fn x, idSubstPmExpr fn e)
-
-idSubstComplexEq :: (Id -> Id) -> ComplexEq -> ComplexEq
-idSubstComplexEq fn (e1,e2) = (idSubstPmExpr fn e1, idSubstPmExpr fn e2)
-
-substComplexEq :: Id -> PmExpr -> ComplexEq -> ComplexEq
-substComplexEq x e (e1, e2) = (substPmExpr x e e1, substPmExpr x e e2)
-
--- Faster than calling `substSimpleEq' and splitting them afterwards
-substSimpleEqs :: Id -> PmExpr -> [SimpleEq] -> ([SimpleEq], [ComplexEq])
-substSimpleEqs _ _ [] = ([],[])
-substSimpleEqs x e ((y,e1):rest)
-  | x == y    = (simple_eqs, (e, e2):complex_eqs)
-  | otherwise = ((y, e2):simple_eqs, complex_eqs)
-  where (simple_eqs, complex_eqs) = substSimpleEqs x e rest
-        e2 = substPmExpr x e e1
 
 -- ----------------------------------------------------------------------------
 -- | Solving equalities between variables
@@ -528,191 +376,6 @@ flattenPmVarEnv env = Map.map (getValuePmExpr env) env
 --     truePmExpr, falsePmExpr or (e1' ~ e2') in case it is uncertain. Note
 --     that it is not e but rather e', since it may perform some
 --     simplifications deeper.
-
--- -----------------------------------------------------------------------
--- | Transform source expressions (HsExpr Id) to PmExpr
-
--- | We lose information but we have to abstract over it
--- to get the results we want. Impossible to play with HsSyn
-
-lhsExprToPmExpr :: LHsExpr Id -> PmExpr
-lhsExprToPmExpr (L _ e) = hsExprToPmExpr e
-
-hsExprToPmExpr :: HsExpr Id -> PmExpr
-
-hsExprToPmExpr (HsVar         x) = PmExprVar x
-hsExprToPmExpr (HsOverLit  olit) = PmExprLit (PmOLit False olit)
-hsExprToPmExpr (HsLit       lit) = PmExprLit (PmSLit lit)
-
-hsExprToPmExpr e@(NegApp _ neg_e)
-  | PmExprLit (PmOLit False ol) <- hsExprToPmExpr neg_e = PmExprLit (PmOLit True ol)
-  | otherwise                                           = PmExprOther e
-hsExprToPmExpr (HsPar   (L _ e)) = hsExprToPmExpr e
-
-hsExprToPmExpr e@(ExplicitTuple ps boxity)
-  | all tupArgPresent ps = PmExprCon tuple_con tuple_args
-  | otherwise            = PmExprOther e
-  where
-    tuple_con  = tupleCon (boxityNormalTupleSort boxity) (length ps)
-    tuple_args = [ lhsExprToPmExpr e | L _ (Present e) <- ps ]
-
-hsExprToPmExpr e@(ExplicitList _elem_ty mb_ol elems)
-  | Nothing <- mb_ol = foldr cons nil (map lhsExprToPmExpr elems)
-  | otherwise        = PmExprOther e {- overloaded list: No PmExprApp -}
-  where
-    cons x xs = PmExprCon consDataCon [x,xs]
-    nil       = PmExprCon nilDataCon  []
-
-hsExprToPmExpr (ExplicitPArr _elem_ty elems)
-  = PmExprCon (parrFakeCon (length elems)) (map lhsExprToPmExpr elems)
-
--- Try and handle this case, it will look like a constructor pattern
--- hsExprToPmExpr e@(RecordCon     _ _ _) = PmExprOther e
-
-hsExprToPmExpr (HsTick            _ e) = lhsExprToPmExpr e
-hsExprToPmExpr (HsBinTick       _ _ e) = lhsExprToPmExpr e
-hsExprToPmExpr (HsTickPragma      _ e) = lhsExprToPmExpr e
-hsExprToPmExpr (HsSCC             _ e) = lhsExprToPmExpr e
-hsExprToPmExpr (HsCoreAnn         _ e) = lhsExprToPmExpr e
-hsExprToPmExpr (ExprWithTySig   e _ _) = lhsExprToPmExpr e
-hsExprToPmExpr (ExprWithTySigOut  e _) = lhsExprToPmExpr e
-
-hsExprToPmExpr e = PmExprOther e -- the rest are not handled by the oracle
-
-{-
-%************************************************************************
-%*                                                                      *
-\subsection{Pretty printing}
-%*                                                                      *
-%************************************************************************
--}
-
-
--- -----------------------------------------------------------------------------
--- | Transform residual constraints in appropriate form for pretty printing
-
-type PmNegLitCt = (Id, (SDoc, [PmLit]))
-
-filterComplex :: [ComplexEq] -> [PmNegLitCt]
-filterComplex = zipWith rename nameList . map mkGroup
-              . groupBy name . sortBy order . mapMaybe isNegLitCs
-  where
-    order x y = compare (fst x) (fst y)
-    name  x y = fst x == fst y
-    mkGroup l = (fst (head l), nub $ map snd l)
-    rename new (old, lits) = (old, (new, lits))
-
-    isNegLitCs (e1,e2)
-      | isFalsePmExpr e1, Just (x,y) <- isPmExprEq e2 = isNegLitCs' x y
-      | isFalsePmExpr e2, Just (x,y) <- isPmExprEq e1 = isNegLitCs' x y
-      | otherwise = Nothing
-
-    isNegLitCs' (PmExprVar x) (PmExprLit l) = Just (x, l)
-    isNegLitCs' (PmExprLit l) (PmExprVar x) = Just (x, l)
-    isNegLitCs' _ _             = Nothing
-
-    nameList :: [SDoc]
-    nameList = [ ptext (sLit ('t':show u)) | u <- [(0 :: Int)..] ]
-
--- ----------------------------------------------------------------------------
-
-runPmPprM :: PmPprM a -> [PmNegLitCt] -> (a, [(SDoc,[PmLit])])
-runPmPprM m lit_env = (result, mapMaybe is_used lit_env)
-  where
-    (result, (_lit_env, used)) = runState m (lit_env, emptyVarSet)
-
-    is_used (x,(name, lits))
-      | elemVarSet x used = Just (name, lits)
-      | otherwise         = Nothing
-
-type PmPprM a = State ([PmNegLitCt], IdSet) a
-
-addUsed :: Id -> PmPprM ()
-addUsed x = modify (\(negated, used) -> (negated, extendVarSet used x))
-
-checkNegation :: Id -> PmPprM (Maybe SDoc) -- the the clean name if it is negated
-checkNegation x = do
-  negated <- gets fst
-  return $ case lookup x negated of
-    Just (new, _) -> Just new
-    Nothing       -> Nothing
-
--- | Pretty print a pmexpr, but remember to prettify the names of the variables that refer to neg-literals
--- what you cannot say leave it an underscore
-pprPmExpr :: PmExpr -> PmPprM SDoc -- the first part of the state is read only. make it a reader? :/
-pprPmExpr (PmExprVar x) = do
-  mb_name <- checkNegation x
-  case mb_name of
-    Just name -> addUsed x >> return name
-    Nothing   -> return $ if debugIsOn then ppr x
-                                       else underscore
-pprPmExpr (PmExprCon con args) = pprPmExprCon con args
-pprPmExpr (PmExprLit l) = return (ppr l)
-pprPmExpr (PmExprEq e1 e2)
-  | debugIsOn = do
-      e1' <- pprPmExpr e1
-      e2' <- pprPmExpr e2
-      return $ braces (e1' <+> equals <+> e2')
-  | otherwise = return underscore
-pprPmExpr (PmExprOther e)
-  | debugIsOn = return (ppr e)
-  | otherwise = return underscore
-
-needsParens :: PmExpr -> Bool
-needsParens (PmExprVar   {}) = False
-needsParens (PmExprLit    l) = isNegatedPmLit l
-needsParens (PmExprEq    {}) = False -- will become a wildcard
-needsParens (PmExprOther {}) = False -- will become a wildcard
-needsParens (PmExprCon c es)
-  | isTupleDataCon c || isPArrFakeCon c
-  || isConsDataCon c || null es = False
-  | otherwise                   = True
-
-pprPmExprWithParens :: PmExpr -> PmPprM SDoc
-pprPmExprWithParens expr
-  | needsParens expr = parens <$> pprPmExpr expr
-  | otherwise        =            pprPmExpr expr
-
-pprPmExprCon :: DataCon -> [PmExpr] -> PmPprM SDoc
-pprPmExprCon con args
-  | isTupleDataCon con = mkTuple <$> mapM pprPmExpr args
-  |  isPArrFakeCon con = mkPArr  <$> mapM pprPmExpr args
-  |  isConsDataCon con = pretty_list
-  | dataConIsInfix con = case args of
-      [x, y] -> do x' <- pprPmExprWithParens x
-                   y' <- pprPmExprWithParens y
-                   return (x' <+> ppr con <+> y')
-      list   -> pprPanic "pprPmExprCon:" (ppr list) -- how can it be infix and have more than two arguments?
-  | null args = return (ppr con)
-  | otherwise = do args' <- mapM pprPmExprWithParens args
-                   return (fsep (ppr con : args'))
-  where
-    mkTuple, mkPArr :: [SDoc] -> SDoc
-    mkTuple = parens     . fsep . punctuate comma
-    mkPArr  = paBrackets . fsep . punctuate comma
-
-    -- lazily, to be used in the list case only
-    pretty_list :: PmPprM SDoc
-    pretty_list = case isNilPmExpr (last elements) of
-      True  -> brackets . fsep . punctuate comma <$> mapM pprPmExpr (init elements)
-      False -> parens   . hcat . punctuate colon <$> mapM pprPmExpr elements
-
-    elements = list_elements args
-
-    list_elements [x,y]
-      | PmExprCon c es <- y,  nilDataCon == c = ASSERT (null es) [x,y]
-      | PmExprCon c es <- y, consDataCon == c = x : list_elements es
-      | otherwise = [x,y]
-    list_elements list  = pprPanic "list_elements:" (ppr list)
-
-instance Outputable PmLit where
-  ppr (PmSLit     l) = pmPprHsLit l
-  ppr (PmOLit neg l) = (if neg then char '-' else empty) <> ppr l
-
--- not really useful for pmexprs per se
-instance Outputable PmExpr where
-  ppr e = fst $ runPmPprM (pprPmExpr e) []
-
 
 -- ----------------------------------------------------------------------------
 

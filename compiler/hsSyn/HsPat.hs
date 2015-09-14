@@ -18,7 +18,7 @@ module HsPat (
 
         HsConDetails(..),
         HsConPatDetails, hsConPatArgs,
-        HsRecFields(..), HsRecField(..), LHsRecField, hsRecFields,
+        HsRecFields(..), HsRecField(..), LHsRecField, hsRecFields, hsRecFieldsArgs,
 
         mkPrefixConPat, mkCharLitPat, mkNilPat,
 
@@ -26,7 +26,7 @@ module HsPat (
         isStrictLPat, hsPatNeedsParens,
         isIrrefutableHsPat,
 
-        collectEvVarsPats, isVanillaPat,
+        collectEvVarsPats,
 
         pprParendLPat, pprConArgs
     ) where
@@ -237,6 +237,9 @@ data HsRecField id arg = HsRecField {
 
 hsRecFields :: HsRecFields id arg -> [id]
 hsRecFields rbinds = map (unLoc . hsRecFieldId . unLoc) (rec_flds rbinds)
+
+hsRecFieldsArgs :: HsRecFields id arg -> [arg]
+hsRecFieldsArgs rbinds = map (hsRecFieldArg . unLoc) (rec_flds rbinds)
 
 {-
 ************************************************************************
@@ -512,39 +515,3 @@ collectEvVarsPat pat =
     SigPatIn _ _      -> panic "foldMapPatBag: SigPatIn"
     _other_pat        -> emptyBag
 
-{-
-% Check if there are only vanilla patterns
--}
-
--- Check whether all constructor patterns that appear in the match
--- are boring haskell98 constructors (No existentials etc.)
-isVanillaConLike :: ConLike -> Bool
-isVanillaConLike (RealDataCon dc) = isVanillaDataCon dc
-isVanillaConLike (PatSynCon   _ ) = False -- It may be but better tc if you are not sure
-
-isVanillaLPat :: OutPat id -> Bool
-isVanillaLPat (L _ p) = isVanillaPat p
-
-isVanillaPat :: Pat id -> Bool
-isVanillaPat (WildPat _)       = True
-isVanillaPat (VarPat _)        = True
-isVanillaPat (LazyPat p)       = isVanillaLPat p
-isVanillaPat (AsPat _ p)       = isVanillaLPat p
-isVanillaPat (ParPat p)        = isVanillaLPat p
-isVanillaPat (BangPat p)       = isVanillaLPat p
-isVanillaPat (ListPat ps _ _)  = all isVanillaLPat ps
-isVanillaPat (TuplePat ps _ _) = all isVanillaLPat ps
-isVanillaPat (PArrPat ps _)    = all isVanillaLPat ps
-isVanillaPat (ConPatOut {pat_con = L _ conlike, pat_args = details})
-  = isVanillaConLike conlike && all isVanillaLPat (hsConPatArgs details)
-isVanillaPat (ViewPat _ p _)     = isVanillaLPat p
-isVanillaPat (SplicePat _)       = True
-isVanillaPat (QuasiQuotePat _)   = True
-isVanillaPat (LitPat _)          = True
-isVanillaPat (NPat _ _ _)        = True
-isVanillaPat (NPlusKPat _ _ _ _) = True
-isVanillaPat (SigPatOut p _)     = isVanillaLPat p
-isVanillaPat (CoPat _ p _)       = isVanillaPat p
-
-isVanillaPat (ConPatIn _ _) = panic "isVanillaPat: ConPatIn"
-isVanillaPat (SigPatIn _ _) = panic "isVanillaPat: SigPatIn"

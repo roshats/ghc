@@ -259,6 +259,7 @@ Library
         CoreUtils
         MkCore
         PprCore
+        PmExpr
         TmOracle
         Check
         Coverage
