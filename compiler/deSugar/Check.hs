@@ -7,7 +7,7 @@
 
 {-# LANGUAGE CPP #-}
 
-module Check ( toTcTypeBag, pprUncovered, checkSingle, checkMatches, PmResult, hsCaseTmCt ) where
+module Check ( toTcTypeBag, pprUncovered, checkSingle, checkMatches, PmResult, hsCaseTmCt, hsCaseTmCtOne ) where
 
 #include "HsVersions.h"
 
@@ -117,11 +117,11 @@ type PmResult = ( [[LPat Id]] -- redundant clauses
 -}
 
 -- Check a single pattern binding (let)
-checkSingle :: Type -> Pat Id -> DsM PmResult
-checkSingle ty p = do
+checkSingle :: Id -> Pat Id -> DsM PmResult
+checkSingle var p = do
   let lp = [noLoc p]
   vec <- liftUs (translatePat p)
-  vsa <- initial_uncovered [ty]
+  vsa <- initial_uncovered [var]
   (c,d,us') <- patVectProc (vec,[]) vsa -- no guards
   us <- pruneValSetAbs us'
   return $ case (c,d) of
@@ -130,11 +130,11 @@ checkSingle ty p = do
     (False, False) -> ([lp], [],   us)
 
 -- Check a matchgroup (case, etc)
-checkMatches :: [Type] -> [LMatch Id (LHsExpr Id)] -> DsM PmResult
-checkMatches tys matches
+checkMatches :: [Id] -> [LMatch Id (LHsExpr Id)] -> DsM PmResult
+checkMatches vars matches
   | null matches = return ([],[],[])
   | otherwise    = do
-      missing    <- initial_uncovered tys
+      missing    <- initial_uncovered vars
       (rs,is,us) <- go matches missing
       return (map hsLMatchPats rs, map hsLMatchPats is, us)
   where
@@ -151,14 +151,12 @@ checkMatches tys matches
         (False, True)  -> (  rs, m:is, us')
         (False, False) -> (m:rs,   is, us')
 
--- You should extend this to algo get term-leven constraints from
--- case expressions.
-initial_uncovered :: [Type] -> DsM ValSetAbs
-initial_uncovered tys = do
+initial_uncovered :: [Id] -> DsM ValSetAbs
+initial_uncovered vars = do
   us <- getUniqueSupplyM
   ty_cs <- TyConstraint . bagToList <$> getDictsDs
   tm_cs <- map (uncurry TmConstraint) . bagToList <$> getTmCsDs
-  let vsa = zipWith mkValAbsVar (listSplitUniqSupply us) tys
+  let vsa = map (VA . PmVar) vars -- zipWith mkValAbsVar (listSplitUniqSupply us) tys
   return $ mkConstraint (ty_cs:tm_cs) (foldr Cons Singleton vsa)
 
 {-
@@ -1080,14 +1078,17 @@ pprOne (vs,(complex, subst)) =
 
 hsCaseTmCt :: Maybe (LHsExpr Id) -- scrutinee
            -> [Pat Id]           -- match (should have length 1)
-           -> [Type]             -- types of patterns (should have length 1)
+           -> [Id]               -- types of patterns (should have length 1)
            -> DsM (Bag SimpleEq)
 hsCaseTmCt Nothing _ _ = return emptyBag
-hsCaseTmCt (Just scr) [p] [ty] = liftUs $ do
+hsCaseTmCt (Just scr) [p] [var] = liftUs $ do
   [e] <- map valAbsToPmExpr . coercePmPats <$> translatePat p
   let scr_e = lhsExprToPmExpr scr
-  var <- mkPmIdSM ty
   return $ listToBag [(var, e), (var, scr_e)]
 hsCaseTmCt _ _ _ = panic "hsCaseTmCt: HsCase"
 
+hsCaseTmCtOne :: Maybe (LHsExpr Id) -> [Id] -> Bag SimpleEq
+hsCaseTmCtOne Nothing     _    = emptyBag
+hsCaseTmCtOne (Just scr) [var] = unitBag (var, lhsExprToPmExpr scr)
+hsCaseTmCtOne _ _              = panic "hsCaseTmCtOne: HsCase"
 

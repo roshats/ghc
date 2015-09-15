@@ -696,26 +696,29 @@ matchWrapper ctxt mb_scr (MG { mg_alts = matches
   = do  { dflags <- getDynFlags
         ; locn   <- getSrcSpanDs
 
-        -- pattern match check warnings
-        ; unless (isGenerated origin) $
-            dsPmWarn dflags (DsMatchContext ctxt locn) (checkMatches arg_tys matches)
-
-        ; eqns_info   <- mapM mk_eqn_info matches
         ; new_vars    <- case matches of
                            []    -> mapM newSysLocalDs arg_tys
                            (m:_) -> selectMatchVars (map unLoc (hsLMatchPats m))
+
+        ; eqns_info   <- mapM (mk_eqn_info new_vars) matches
+
+        -- pattern match check warnings
+        ; let tm_cs = hsCaseTmCtOne mb_scr new_vars
+        ; unless (isGenerated origin) $
+            dsPmWarn dflags (DsMatchContext ctxt locn) (addTmCsDs tm_cs $ checkMatches new_vars matches)
+
         ; result_expr <- handleWarnings $
                          matchEquations ctxt new_vars eqns_info rhs_ty
         ; return (new_vars, result_expr) }
   where
-    mk_eqn_info (L _ (Match pats _ grhss))
+    mk_eqn_info vars (L _ (Match pats _ grhss))
       = do { let upats  = map unLoc pats
-                 dicts  = toTcTypeBag (collectEvVarsPats upats) -- check rhs with constraints from match in scope -- Only TcTyVars
+                 dicts  = toTcTypeBag (collectEvVarsPats upats) -- Only TcTyVars
 
-           ; tm_cs <- hsCaseTmCt mb_scr upats arg_tys
-           ; match_result <- addDictsDs dicts $
-                               addTmCsDs tm_cs $
-                                 dsGRHSs ctxt upats grhss rhs_ty
+           ; tm_cs <- hsCaseTmCt mb_scr upats vars -- arg_tys
+           ; match_result <- addDictsDs dicts $  -- pass type constraints inwards
+                               addTmCsDs tm_cs $ -- pass term constraints inwards
+                                 dsGRHSs ctxt upats grhss rhs_ty -- THEY SHOULD BE PASSED HERE TOO BECAUSE IT IS GONNA GENERATE AGAIN
            ; return (EqnInfo { eqn_pats = upats, eqn_rhs  = match_result}) }
 
     -- not sure if it is needed anymore (does `matchEquations' generate any other warning?)
@@ -774,7 +777,7 @@ matchSinglePat (Var var) ctx (L _ pat) ty match_result
        ; locn   <- getSrcSpanDs
 
        -- pattern match check warnings
-       ; dsPmWarn dflags (DsMatchContext ctx locn) (checkSingle (idType var) pat)
+       ; dsPmWarn dflags (DsMatchContext ctx locn) (checkSingle var pat)
 
        ; matchCheck (DsMatchContext ctx locn)
                     [var] ty
