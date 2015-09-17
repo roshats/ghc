@@ -7,7 +7,16 @@
 
 {-# LANGUAGE CPP #-}
 
-module Check ( toTcTypeBag, pprUncovered, checkSingle, checkMatches, PmResult, hsCaseTmCt, hsCaseTmCtOne ) where
+module Check (
+        -- Actual check
+        checkSingle, checkMatches, PmResult,
+
+        -- Pretty printing
+        pprUncovered,
+
+        -- See NOTE [Type and Term Equality Propagation]
+        genCaseTmCs1, genCaseTmCs2
+    ) where
 
 #include "HsVersions.h"
 
@@ -50,9 +59,12 @@ This module checks pattern matches for:
   \item Exhaustiveness
 \end{enumerate}
 
-The algorithm used is described in the paper "GADTs meet their match"
+The algorithm used is described in the paper:
 
-    http://people.cs.kuleuven.be/~george.karachalias/papers/gadtpm_ext.pdf
+  "GADTs Meet Their Match:
+     Pattern-matching Warnings That Account for GADTs, Guards, and Laziness"
+
+    http://people.cs.kuleuven.be/~george.karachalias/papers/p424-karachalias.pdf
 
 %************************************************************************
 %*                                                                      *
@@ -83,8 +95,8 @@ data Pattern = PmGuard PatVec PmExpr      -- Guard Patterns
 
 newtype ValAbs = VA (PmPat ValAbs) -- Value Abstractions
 
-type PatVec    = [Pattern] -- pattern vectors
-type ValVecAbs = [ValAbs]  -- value vector abstractions
+type PatVec    = [Pattern] -- Pattern Vectors
+type ValVecAbs = [ValAbs]  -- Value Vector Abstractions
 
 -- data T a where
 --     MkT :: forall p q. (Eq p, Ord q) => p -> q -> T [p]
@@ -107,6 +119,10 @@ data ValSetAbs   -- Reprsents a set of value vector abstractions
 type PmResult = ( [[LPat Id]] -- redundant clauses
                 , [[LPat Id]] -- clauses with inaccessible rhs
                 , [(ValVecAbs,([ComplexEq], PmVarEnv))] ) -- missing
+
+{-
+NOTE [
+-}
 
 {-
 %************************************************************************
@@ -1075,20 +1091,61 @@ pprOne (vs,(complex, subst)) =
 
 
 -- ----------------------------------------------------------------------------
+-- | Propagation of term constraints inwards when checking nested matches
 
-hsCaseTmCt :: Maybe (LHsExpr Id) -- scrutinee
-           -> [Pat Id]           -- match (should have length 1)
-           -> [Id]               -- types of patterns (should have length 1)
-           -> DsM (Bag SimpleEq)
-hsCaseTmCt Nothing _ _ = return emptyBag
-hsCaseTmCt (Just scr) [p] [var] = liftUs $ do
+{-
+NOTE [Type and Term Equality Propagation]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+When checking a match it would be great to have all type and term information
+available so we can get more precise results. For this reason we have functions
+`addDictsDs' and `addTmCsDs' in DsMonad that store in the environment type and
+term constraints (respectively) as we go deeper.
+
+The type constraints we propagate inwards are collected by `collectEvVarsPats'
+in HsPat.hs. This handles bug #4139 ( see example
+  https://ghc.haskell.org/trac/ghc/attachment/ticket/4139/GADTbug.hs )
+where this is needed.
+
+For term equalities we do less, we just generate equalities for HsCase. For
+example we accurately give 2 redundancy warnings for the marked cases:
+
+f :: [a] -> Bool
+f x = case x of
+
+  []    -> case x of        -- brings (x ~ []) in scope
+             []    -> True
+             (_:_) -> False -- can't happen
+
+  (_:_) -> case x of        -- brings (x ~ (_:_)) in scope
+             (_:_) -> True
+             []    -> False -- can't happen
+
+Functions `genCaseTmCs1' and `genCaseTmCs2' are responsible for generating
+these constraints.
+-}
+
+-- | Generate equalities when checking a case expression:
+--     case x of { p1 -> e1; ... pn -> en }
+-- When we go deeper to check e.g. e1 we record two equalities:
+-- (x ~ y), where y is the initial uncovered when checking (p1; .. ; pn)
+-- and (x ~ p1).
+genCaseTmCs2 :: Maybe (LHsExpr Id) -- Scrutinee
+             -> [Pat Id]           -- LHS       (should have length 1)
+             -> [Id]               -- MatchVars (should have length 1)
+             -> DsM (Bag SimpleEq)
+genCaseTmCs2 Nothing _ _ = return emptyBag
+genCaseTmCs2 (Just scr) [p] [var] = liftUs $ do
   [e] <- map valAbsToPmExpr . coercePmPats <$> translatePat p
   let scr_e = lhsExprToPmExpr scr
   return $ listToBag [(var, e), (var, scr_e)]
-hsCaseTmCt _ _ _ = panic "hsCaseTmCt: HsCase"
+genCaseTmCs2 _ _ _ = panic "genCaseTmCs2: HsCase"
 
-hsCaseTmCtOne :: Maybe (LHsExpr Id) -> [Id] -> Bag SimpleEq
-hsCaseTmCtOne Nothing     _    = emptyBag
-hsCaseTmCtOne (Just scr) [var] = unitBag (var, lhsExprToPmExpr scr)
-hsCaseTmCtOne _ _              = panic "hsCaseTmCtOne: HsCase"
+-- | Generate a simple equality when checking a case expression:
+--     case x of { matches }
+-- When checking matches we record that (x ~ y) where y is the initial
+-- uncovered. All matches will have to satisfy this equality.
+genCaseTmCs1 :: Maybe (LHsExpr Id) -> [Id] -> Bag SimpleEq
+genCaseTmCs1 Nothing     _    = emptyBag
+genCaseTmCs1 (Just scr) [var] = unitBag (var, lhsExprToPmExpr scr)
+genCaseTmCs1 _ _              = panic "genCaseTmCs1: HsCase"
 

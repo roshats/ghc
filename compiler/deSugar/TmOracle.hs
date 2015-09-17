@@ -12,10 +12,9 @@ module TmOracle (
           hsExprToPmExpr, lhsExprToPmExpr, isNotPmExprOther,
           pmLitType, tmOracle, notForced, flattenPmVarEnv,
           falsePmExpr, getValuePmExpr, filterComplex, runPmPprM,
-          pprPmExprWithParens,
-
-          -- Incremental version
-          solveSimplesIncr, initialIncrState
+          pprPmExprWithParens
+          -- -- Incremental version
+          -- solveSimplesIncr, initialIncrState
     ) where
 
 #include "HsVersions.h"
@@ -74,35 +73,30 @@ B. Solving Phase
    expressions etc. (simplifyComplexEqs).
 2) If some simplification happens, prepare the constraints (prepComplexEq) and
    repeat the Solving Phase.
-
 -}
 
 -- ----------------------------------------------------------------------------
 -- | Oracle Types
 
 -- | The oracle will try and solve the wanted term constraints. If there is no
--- problem we get back a list of residual constraints. There are 2 types of
--- falures:
---   * Just eq: The set of constraints is non-satisfiable. The eq is evidence
---     (one of the possibly many) of non-satisfiability.
---   * Nothing: The constraints gave rise to a (well-typed) constraint of the
---     form (K ps ~ lit), which actually is equivalent to (K ps ~ from lit),
---     where `from' is the respective overloaded function (fromInteger, etc.)
---     By default we do not unfold functions (not currently, that it) so the
---     oracle gives up (See trac #322).
+-- problem we get back a list of residual constraints. If an inconsistent
+-- constraint is found, it will be returned as the evidence of failure.
 type Failure = ComplexEq
 
--- | The oracle environment. As the solver processess the constraints, a
+-- | The substitution. As the solver processess the constraints, a
 -- substitution theta is generated. Since at every step the algorithm completely
 -- eliminates a variable, we end up with a DAG. If there were loops, the
 -- algorithm would also loop (we do not inspect function calls that may be
 -- recursive so there is not termination problem at the moment).
 type PmVarEnv = Map.Map Id PmExpr
 
-type TmOracleEnv = ([ComplexEq], PmVarEnv) -- The first is the things we cannot solve (HsExpr, overloading rubbish, etc.)
+-- | The environment of the oracle contains
+--     1. A set of constraints that cannot be handled (PmExprOther stuff).
+--     2. A substitution we extend with every step and return as a result.
+type TmOracleEnv = ([ComplexEq], PmVarEnv)
 
 -- | The oracle monad.
-type TmOracleM a = StateT TmOracleEnv (Except Failure) a -- keep eqs (x~HsExpr) in the environment. We wont do anything with them
+type TmOracleM a = StateT TmOracleEnv (Except Failure) a
 
 -- ----------------------------------------------------------------------------
 -- | Oracle utils
@@ -111,6 +105,7 @@ type TmOracleM a = StateT TmOracleEnv (Except Failure) a -- keep eqs (x~HsExpr) 
 runTmOracleM :: TmOracleM a -> Either Failure (a, TmOracleEnv)
 runTmOracleM m = runExcept (runStateT m ([], Map.empty))
 
+-- | To lift stuff that has no failure possibility into the monad
 liftTmOracleM :: (PmVarEnv -> (res, PmVarEnv)) -> TmOracleM res
 liftTmOracleM f = do
   (other_eqs, env) <- get
@@ -118,30 +113,31 @@ liftTmOracleM f = do
   put (other_eqs, env')
   return res
 
+-- | Add unhandled equalities in the state.
 addUnhandledEqs :: [ComplexEq] -> TmOracleM ()
 addUnhandledEqs eqs = modify (first (eqs++))
 
--- Extend the substitution
+-- | Extend the substitution.
 addSubst :: Id -> PmExpr -> PmVarEnv -> PmVarEnv
 addSubst x e env = case Map.lookup x env of
   Nothing -> Map.insert x e env
-  Just e' -> pprPanic "Check.addSubst:" (ppr x $$ ppr e $$ ppr e') -- just for sanity check
+  Just e' -> pprPanic "Check.addSubst:" (ppr x $$ ppr e $$ ppr e')
+
+-- | Non-satisfiable set of constraints.
+mismatch :: ComplexEq -> TmOracleM a
+mismatch eq = lift (throwE eq)
 
 -- ----------------------------------------------------------------------------
 
 partitionSimpleM :: [SimpleEq] -> TmOracleM ([VarEq], [SimpleEq])
-partitionSimpleM in_cs = addUnhandledEqs (map toComplex res_eqs) >> return (var_eqs, other_eqs)
+partitionSimpleM in_cs = do addUnhandledEqs (map toComplex res_eqs)
+                            return (var_eqs, other_eqs)
   where (var_eqs, other_eqs, res_eqs) = partitionSimple in_cs
 
 partitionComplexM :: [ComplexEq] -> TmOracleM ([VarEq], [SimpleEq], [ComplexEq])
-partitionComplexM in_cs = addUnhandledEqs (map toComplex res_eqs) >> return (var_eqs, simpl_eqs, other_eqs)
+partitionComplexM in_cs = do addUnhandledEqs (map toComplex res_eqs)
+                             return (var_eqs, simpl_eqs, other_eqs)
   where (var_eqs, simpl_eqs, other_eqs, res_eqs) = partitionComplex in_cs
-
--- ----------------------------------------------------------------------------
-
--- Non-satisfiable set of constraints
-mismatch :: ComplexEq -> TmOracleM a
-mismatch eq = lift (throwE eq)
 
 -- ----------------------------------------------------------------------------
 -- | Solving equalities between variables
@@ -297,7 +293,10 @@ certainlyEqual e1 e2 =
 -- ----------------------------------------------------------------------------
 -- | Entry point to the solver
 
-tmOracle :: [SimpleEq] -> Either Failure ([ComplexEq], TmOracleEnv) -- return residual constraints and final mapping
+-- | The term oracle. Returns residual constraints, unhandled constraints and
+-- the final mapping. In case of failure, it returns a witness.
+
+tmOracle :: [SimpleEq] -> Either Failure ([ComplexEq], TmOracleEnv)
 tmOracle simple_eqs = runTmOracleM (solveAll simple_eqs)
 
 solveAll :: [SimpleEq] -> TmOracleM [ComplexEq]
@@ -310,7 +309,9 @@ solveAll eqs = do
   iterateComplex complex_eqs
 
 -- ----------------------------------------------------------------------------
+-- | Some more utilities
 
+-- | Traverse the DAG to get the final value of a PmExpr
 getValuePmExpr :: PmVarEnv -> PmExpr -> PmExpr
 getValuePmExpr env (PmExprVar x)
   | Just e <- Map.lookup x env = getValuePmExpr env e
@@ -319,91 +320,71 @@ getValuePmExpr env (PmExprCon c es) = PmExprCon c (map (getValuePmExpr env) es)
 getValuePmExpr env (PmExprEq e1 e2) = PmExprEq (getValuePmExpr env e1) (getValuePmExpr env e2)
 getValuePmExpr _   other_expr       = other_expr
 
+-- | Check whether a variable has been refined to (at least) a WHNF
 notForced :: Id -> PmVarEnv -> Bool
 notForced x env = case getValuePmExpr env (PmExprVar x) of
   PmExprVar _ -> True
   _other_expr -> False
 
--- Not really efficient, it recomputes stuff
+-- | Flatten the DAG. (Could be improved in terms of performance)
 flattenPmVarEnv :: PmVarEnv -> PmVarEnv
 flattenPmVarEnv env = Map.map (getValuePmExpr env) env
 
 -- ----------------------------------------------------------------------------
-
--- NOTE [Representation of substitution]
 --
--- Throughout the code we use 2 different ways to represent substitutions:
---   * Substitutions from variables to variables are represented using Haskell
---     functions with type (Id -> Id).
---   * Substitutions from variables to expressions are usually passed explicitly
---     as two arguments (the Id and the PmExpr to substitute it with)
--- By convention, substitutions of the first kind are prefixed by `idSubst'
--- while the latter are prefixed simply by 'subst'.
-
-
--- NOTE [PmExprOther in PmExpr]
+-- initialIncrState :: ([ComplexEq], TmOracleEnv)
+-- initialIncrState = ([], ([], Map.empty))
 --
--- Data constructor `PmExprOther' lifts an (HsExpr Id) to a PmExpr. Ideally we
--- would have only (HsExpr Id) but this would be really verbose:
---    The solver is pretty naive and cannot handle many Haskell expressions.
--- Since there is no plan (for the near future) to change the solver there
--- is no need to work with the full HsExpr type (more than 45 constructors).
+-- solveSimplesIncr :: ([ComplexEq], TmOracleEnv) -- residual & previous state
+--                  -> [SimpleEq]                 -- what to solve
+--                  -> Either Failure ([ComplexEq], TmOracleEnv)
+-- solveSimplesIncr (residual, (unhandled, mapping)) simples
+--   =  runExcept (runStateT result (unhandled, mapping))
+--   where
+--     complex = map (applySubstSimpleEq mapping) simples ++ residual
+--     result  = prepComplexEqM complex >>= iterateComplex
 --
--- Functions `substPmExpr' and `idSubstPmExpr' do not substitute in HsExpr, which
--- could be a problem for a different solver. E.g:
+-- applySubstSimpleEq :: PmVarEnv -> SimpleEq -> ComplexEq
+-- applySubstSimpleEq env (x,e2)
+--   = case Map.lookup x env of
+--       Just e1 -> (e1,          getValuePmExpr env e2)
+--       Nothing -> (PmExprVar x, getValuePmExpr env e2)
 --
--- For the following set of constraints (HsExpr in braces):
---
---   (y ~ x, y ~ z, y ~ True, y ~ False, {not y})
---
--- would be simplified (in one step using `solveVarEqs') to:
---
---   (x ~ True, x ~ False, {not y})
---
--- i.e. y is now free to be unified with anything! This is not a problem now
--- because we never inspect a PmExprOther (They always end up in residual)
--- but a more sophisticated solver may need to do so!
-
-
--- NOTE [Deep equalities]
---
--- Solving nested equalities is the most difficult part. The general strategy
--- is the following:
---
---   * Equalities of the form (True ~ (e1 ~ e2)) are transformed to just
---     (e1 ~ e2) and then treated recursively.
---
---   * Equalities of the form (False ~ (e1 ~ e2)) cannot be analyzed unless
---     we know more about the inner equality (e1 ~ e2). That's exactly what
---     `certainlyEqual' tries to do: It takes e1 and e2 and either returns
---     truePmExpr, falsePmExpr or (e1' ~ e2') in case it is uncertain. Note
---     that it is not e but rather e', since it may perform some
---     simplifications deeper.
-
 -- ----------------------------------------------------------------------------
 
-initialIncrState :: ([ComplexEq], TmOracleEnv)
-initialIncrState = ([], ([], Map.empty))
-
-solveSimplesIncr :: ([ComplexEq], TmOracleEnv) -- residual & previous state
-                 -> [SimpleEq]                 -- what to solve
-                 -> Either Failure ([ComplexEq], TmOracleEnv)
-solveSimplesIncr (residual, (unhandled, mapping)) simples
-  =  runExcept (runStateT result (unhandled, mapping))
-  where
-    complex = map (applySubstSimpleEq mapping) simples ++ residual
-    result  = prepComplexEqM complex >>= iterateComplex
-
-applySubstSimpleEq :: PmVarEnv -> SimpleEq -> ComplexEq
-applySubstSimpleEq env (x,e2)
-  = case Map.lookup x env of
-      Just e1 -> (e1,          getValuePmExpr env e2)
-      Nothing -> (PmExprVar x, getValuePmExpr env e2)
-
--- ----------------------------------------------------------------------------
-
--- should be in PmExpr but generates cyclic imports :(
+-- Should be in PmExpr gives cyclic imports :(
 pmLitType :: PmLit -> Type
 pmLitType (PmSLit   lit) = hsLitType   lit
 pmLitType (PmOLit _ lit) = overLitType lit
+
+-- ----------------------------------------------------------------------------
+
+{-
+NOTE [Representation of substitution]
+
+Throughout the code we use 2 different ways to represent substitutions:
+  * Substitutions from variables to variables are represented using Haskell
+    functions with type (Id -> Id).
+  * Substitutions from variables to expressions are usually passed explicitly
+    as two arguments (the Id and the PmExpr to substitute it with)
+By convention, substitutions of the first kind are prefixed by `idSubst'
+while the latter are prefixed simply by 'subst'.
+-}
+
+{-
+NOTE [Deep equalities]
+
+Solving nested equalities is the most difficult part. The general strategy
+is the following:
+
+  * Equalities of the form (True ~ (e1 ~ e2)) are transformed to just
+    (e1 ~ e2) and then treated recursively.
+
+  * Equalities of the form (False ~ (e1 ~ e2)) cannot be analyzed unless
+    we know more about the inner equality (e1 ~ e2). That's exactly what
+    `certainlyEqual' tries to do: It takes e1 and e2 and either returns
+    truePmExpr, falsePmExpr or (e1' ~ e2') in case it is uncertain. Note
+    that it is not e but rather e', since it may perform some
+    simplifications deeper.
+-}
 

@@ -36,6 +36,7 @@ import PatSyn
 import MatchCon
 import MatchLit
 import Type
+import TcType ( toTcTypeBag )
 import TyCon( isNewTyCon )
 import TysWiredIn
 import ListSetOps
@@ -703,9 +704,11 @@ matchWrapper ctxt mb_scr (MG { mg_alts = matches
         ; eqns_info   <- mapM (mk_eqn_info new_vars) matches
 
         -- pattern match check warnings
-        ; let tm_cs = hsCaseTmCtOne mb_scr new_vars
         ; unless (isGenerated origin) $
-            dsPmWarn dflags (DsMatchContext ctxt locn) (addTmCsDs tm_cs $ checkMatches new_vars matches)
+            -- See NOTE [Type and Term Equality Propagation]
+            addTmCsDs (genCaseTmCs1 mb_scr new_vars) $
+              dsPmWarn dflags (DsMatchContext ctxt locn) $
+                checkMatches new_vars matches
 
         ; result_expr <- handleWarnings $
                          matchEquations ctxt new_vars eqns_info rhs_ty
@@ -715,10 +718,10 @@ matchWrapper ctxt mb_scr (MG { mg_alts = matches
       = do { let upats  = map unLoc pats
                  dicts  = toTcTypeBag (collectEvVarsPats upats) -- Only TcTyVars
 
-           ; tm_cs <- hsCaseTmCt mb_scr upats vars -- arg_tys
-           ; match_result <- addDictsDs dicts $  -- pass type constraints inwards
-                               addTmCsDs tm_cs $ -- pass term constraints inwards
-                                 dsGRHSs ctxt upats grhss rhs_ty -- THEY SHOULD BE PASSED HERE TOO BECAUSE IT IS GONNA GENERATE AGAIN
+           ; tm_cs <- genCaseTmCs2 mb_scr upats vars
+           ; match_result <- addDictsDs dicts $  -- See NOTE [Type and Term Equality Propagation]
+                               addTmCsDs tm_cs $ -- See NOTE [Type and Term Equality Propagation]
+                                 dsGRHSs ctxt upats grhss rhs_ty
            ; return (EqnInfo { eqn_pats = upats, eqn_rhs  = match_result}) }
 
     -- not sure if it is needed anymore (does `matchEquations' generate any other warning?)

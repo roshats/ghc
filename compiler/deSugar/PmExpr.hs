@@ -53,41 +53,34 @@ import Control.Monad.Trans.State.Lazy
 {-
 %************************************************************************
 %*                                                                      *
-\subsection{The term equality oracle}
+\subsection{Lifted Expressions}
 %*                                                                      *
 %************************************************************************
+-}
 
--- NOTE [Term oracle strategy]
+{-
+NOTE [PmExprOther in PmExpr]
 
-Because of the incremental nature of the algorithm, initially all constraints
-are shallow and most of them are simple equalities between variables. In
-general, even if we start only with equalities of the form (x ~ e), the oracle
-distinguishes between equalities of 3 different forms:
+Since there is no plan to extend the (currently pretty naive) term oracle in
+the near future, instead of playing with the verbose (HsExpr Id), we lift it to
+PmExpr. All expressions the term oracle does not handle are wrapped by the
+constructor PmExprOther.
 
-  * Variable equalities (VE) of the form (x ~ y)
-  * Simple   equalities (SE) of the form (x ~ e)
-  * Complex  equalities (CE) of the form (e ~ e')
+Note that functions `idSubstPmExpr' and `substPmExpr' do not substitute in
+PmExprOther. This means that, for example, the following set of constraints
+(HsExpr in braces):
 
-The overall strategy works in 2 phases:
+  (y ~ x, y ~ z, y ~ True, y ~ False, {not y})
 
-A. Preparation Phase
-====================
-1) Partition initial set into VE and 'actual simples' SE (partitionSimple).
-2) Solve VE (solveVarEqs) and apply the resulting substitution in SE.
-3) Repeatedly apply [x |-> e] to SE, as long as a simple equality (x ~ e)
-   exists in it (eliminateSimples). The result is a set of 'actual' complex
-   equalities CE.
+would be simplified by the term oracle (in one step using `solveVarEqs', See
+NOTE [Term oracle strategy]) to:
 
-Steps (1),(2),(3) are all performed by `prepComplexEq' on CE, which is the
-most general form of equality.
+  inner set   : (x ~ True, x ~ False, {not y})
+  substitution: y |-> x
 
-B. Solving Phase
-================
-1) Try to simplify the constraints by means of flattening, evaluation of
-   expressions etc. (simplifyComplexEqs).
-2) If some simplification happens, prepare the constraints (prepComplexEq) and
-   repeat the Solving Phase.
-
+and now y seems free to be unified with anything which is false! It still plays
+on the safe side but the *right-thing-to-do* would be to substitute in
+PmExprOther as well.
 -}
 
 -- ----------------------------------------------------------------------------
@@ -165,24 +158,30 @@ isNegatedPmLit :: PmLit -> Bool
 isNegatedPmLit (PmOLit b _) = b
 isNegatedPmLit _other_lit   = False
 
--- | Check whether a PmExpr is equal to term `True' (syntactically).
+-- | Check whether a PmExpr is syntactically equal to term `True'.
 isTruePmExpr :: PmExpr -> Bool
 isTruePmExpr (PmExprCon c []) = c == trueDataCon
 isTruePmExpr _other_expr      = False
 
--- | Check whether a PmExpr is equal to term `False' (syntactically).
+-- | Check whether a PmExpr is syntactically equal to term `False'.
 isFalsePmExpr :: PmExpr -> Bool
 isFalsePmExpr (PmExprCon c []) = c == falseDataCon
 isFalsePmExpr _other_expr      = False
 
+-- | Check whether a PmExpr is syntactically e
 isNilPmExpr :: PmExpr -> Bool
 isNilPmExpr (PmExprCon c _) = c == nilDataCon
 isNilPmExpr _other_expr     = False
 
+-- | Check whether a PmExpr is syntactically equal to (x == y).
+-- Since (==) is overloaded and can have an arbitrary implementation, we use
+-- the PmExprEq constructor to represent only equalities with non-overloaded
+-- literals where it coincides with a syntactic equality check.
 isPmExprEq :: PmExpr -> Maybe (PmExpr, PmExpr)
 isPmExprEq (PmExprEq e1 e2) = Just (e1,e2)
 isPmExprEq _other_expr      = Nothing
 
+-- | Check if a DataCon is (:).
 isConsDataCon :: DataCon -> Bool
 isConsDataCon con = consDataCon == con
 
@@ -223,7 +222,7 @@ idSubstComplexEq fn (e1,e2) = (idSubstPmExpr fn e1, idSubstPmExpr fn e2)
 substComplexEq :: Id -> PmExpr -> ComplexEq -> ComplexEq
 substComplexEq x e (e1, e2) = (substPmExpr x e e1, substPmExpr x e e2)
 
--- | Substitute in a simple equalities and partition them to the ones that
+-- | Substitute in simple equalities and partition them to the ones that
 -- remain simple and the ones that become complex.
 substSimpleEqs :: Id -> PmExpr -> [SimpleEq] -> ([SimpleEq], [ComplexEq])
 substSimpleEqs _ _ [] = ([],[])
@@ -296,12 +295,35 @@ hsExprToPmExpr e = PmExprOther e -- the rest are not handled by the oracle
 %************************************************************************
 -}
 
+{-
 
--- f :: Int -> Bool
--- f 
+1. Literals
+~~~~~~~~~~~
+Starting with a function definition like:
 
--- type PmPprM a = State ([PmNegLitCt], IdSet) a
+    f :: Int -> Bool
+    f 5 = True
+    f 6 = True
 
+The uncovered set looks like:
+    { var |> False == (var == 5), False == (var == 6) }
+
+Yet, we would like to print this nicely as follows:
+   x , where x not one of {5,6}
+
+Function `filterComplex' takes the set of residual constraints and packs
+together the negative constraints that refer to the same variable so we can do
+just this. Since these variables will be shown to the programmer, we also give
+them better names (t1, t2, ..), hence the SDoc in PmNegLitCt.
+
+2. Residual Constraints
+~~~~~~~~~~~~~~~~~~~~~~~
+Unhandled constraints that refer to HsExpr are typically ignored by the solver
+(it does not even substitute in HsExpr, See NOTE [Term oracle strategy]) so
+they are printed as wildcards. Additionally, the oracle returns a substitution
+if it succeeds so we apply this substitution to the vectors before printing
+them out (see function `pprOne' in Check.hs) to be more precice.
+-}
 
 -- -----------------------------------------------------------------------------
 -- | Transform residual constraints in appropriate form for pretty printing
@@ -345,7 +367,7 @@ type PmPprM a = State ([PmNegLitCt], IdSet) a
 addUsed :: Id -> PmPprM ()
 addUsed x = modify (\(negated, used) -> (negated, extendVarSet used x))
 
-checkNegation :: Id -> PmPprM (Maybe SDoc) -- the the clean name if it is negated
+checkNegation :: Id -> PmPprM (Maybe SDoc) -- the clean name if it is negated
 checkNegation x = do
   negated <- gets fst
   return $ case lookup x negated of
