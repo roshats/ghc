@@ -19,7 +19,6 @@ import HsSyn
 import TcHsSyn
 import TcEvidence
 import TcRnMonad
-import PmExpr
 import Check
 import CoreSyn
 import Literal
@@ -717,8 +716,7 @@ matchEquations  :: HsMatchContext Name
                 -> [Id] -> [EquationInfo] -> Type
                 -> DsM CoreExpr
 matchEquations ctxt vars eqns_info rhs_ty
-  = do  { locn <- getSrcSpanDs
-        ; let error_doc = matchContextErrString ctxt
+  = do  { let error_doc = matchContextErrString ctxt
 
         ; match_result <- match vars rhs_ty eqns_info
 

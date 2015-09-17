@@ -169,10 +169,9 @@ checkMatches vars matches
 
 initial_uncovered :: [Id] -> DsM ValSetAbs
 initial_uncovered vars = do
-  us <- getUniqueSupplyM
   ty_cs <- TyConstraint . bagToList <$> getDictsDs
   tm_cs <- map (uncurry TmConstraint) . bagToList <$> getTmCsDs
-  let vsa = map (VA . PmVar) vars -- zipWith mkValAbsVar (listSplitUniqSupply us) tys
+  let vsa = map (VA . PmVar) vars
   return $ mkConstraint (ty_cs:tm_cs) (foldr Cons Singleton vsa)
 
 {-
@@ -634,9 +633,6 @@ mkPatternVarSM ty = flip mkPatternVar ty <$> getUniqueSupplyM
 
 mkPatternVarsSM :: [Type] -> UniqSM PatVec
 mkPatternVarsSM tys = mapM mkPatternVarSM tys
-
-mkPmIdSM :: Type -> UniqSM Id
-mkPmIdSM ty = flip mkPmId ty <$> getUniqueSupplyM
 
 mkPmId :: UniqSupply -> Type -> Id
 mkPmId usupply ty = mkLocalId name ty
