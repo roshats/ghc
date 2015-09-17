@@ -52,23 +52,6 @@ import Control.Monad( when, unless )
 import qualified Data.Map as Map
 
 {-
-This function is a wrapper of @match@, it must be called from all the parts where
-it was called match, but only substitutes the first call, ....
-if the associated flags are declared, warnings will be issued.
-It can not be called matchWrapper because this name already exists :-(
-
-JJCQ 30-Nov-1997
--}
-
-matchCheck :: DsMatchContext
-           -> [Id]             -- Vars rep'ing the exprs we're matching with
-           -> Type             -- Type of the case expression
-           -> [EquationInfo]   -- Info about patterns, etc. (type synonym below)
-           -> DsM MatchResult  -- Desugared result!
-
-matchCheck _ctx vars ty qs = match vars ty qs -- remove this function maybe?
-
-{-
 ************************************************************************
 *                                                                      *
                 The main matching function
@@ -735,10 +718,9 @@ matchEquations  :: HsMatchContext Name
                 -> DsM CoreExpr
 matchEquations ctxt vars eqns_info rhs_ty
   = do  { locn <- getSrcSpanDs
-        ; let   ds_ctxt   = DsMatchContext ctxt locn
-                error_doc = matchContextErrString ctxt
+        ; let error_doc = matchContextErrString ctxt
 
-        ; match_result <- matchCheck ds_ctxt vars rhs_ty eqns_info
+        ; match_result <- match vars rhs_ty eqns_info
 
         ; fail_expr <- mkErrorAppDs pAT_ERROR_ID rhs_ty error_doc
         ; extractMatchResult match_result fail_expr }
@@ -782,9 +764,8 @@ matchSinglePat (Var var) ctx (L _ pat) ty match_result
        -- pattern match check warnings
        ; dsPmWarn dflags (DsMatchContext ctx locn) (checkSingle var pat)
 
-       ; matchCheck (DsMatchContext ctx locn)
-                    [var] ty
-                    [EqnInfo { eqn_pats = [pat], eqn_rhs  = match_result }] }
+       ; match [var] ty
+               [EqnInfo { eqn_pats = [pat], eqn_rhs  = match_result }] }
 
 matchSinglePat scrut hs_ctx pat ty match_result
   = do { var <- selectSimpleMatchVarL pat
