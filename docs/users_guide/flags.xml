@@ -2770,6 +2770,12 @@
             <entry>-</entry>
           </row>
           <row>
+            <entry><option>-split-sections</option></entry>
+            <entry>Split sections</entry>
+            <entry>dynamic</entry>
+            <entry>-</entry>
+          </row>
+          <row>
             <entry><option>-static</option></entry>
             <entry>Use static Haskell libraries</entry>
             <entry>dynamic</entry>
