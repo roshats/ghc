@@ -83,12 +83,13 @@ data PmConstraint = TmConstraint Id PmExpr -- Term equalities: x ~ e
 -- the number of p1..pn that are not Guards
 
 data PmPat p = PmCon { pm_con_con     :: DataCon
-                     , pm_con_arg_tys :: [Type]
-                     , pm_con_tvs     :: [TyVar]
-                     , pm_con_dicts   :: [EvVar]
+                     , pm_con_arg_tys :: [Type]  -- The univeral arg types, 1-1 with the universal
+                                                 --   tyvars of the constructor
+                     , pm_con_tvs     :: [TyVar] -- Existentially bound type variables (tyvars only)
+                     , pm_con_dicts   :: [EvVar] -- Ditto *coercion variables* and *dictionaries*
                      , pm_con_args    :: [p] }
              | PmVar { pm_var_id      :: Id }
-             | PmLit { pm_lit_lit     :: PmLit }
+             | PmLit { pm_lit_lit     :: PmLit } -- See NOTE [Literals in PmPat]
 
 data Pattern = PmGuard PatVec PmExpr      -- Guard Patterns
              | NonGuard (PmPat Pattern)   -- Other Patterns
@@ -119,10 +120,6 @@ data ValSetAbs   -- Reprsents a set of value vector abstractions
 type PmResult = ( [[LPat Id]] -- redundant clauses
                 , [[LPat Id]] -- clauses with inaccessible rhs
                 , [(ValVecAbs,([ComplexEq], PmVarEnv))] ) -- missing
-
-{-
-NOTE [
--}
 
 {-
 %************************************************************************
@@ -185,44 +182,44 @@ initial_uncovered vars = do
 -- -----------------------------------------------------------------------
 -- | Utilities
 
-nullaryPmConPat :: DataCon -> Pattern
+nullaryConPattern :: DataCon -> Pattern
 -- Nullary data constructor and nullary type constructor
-nullaryPmConPat con = NonGuard $
+nullaryConPattern con = NonGuard $
   PmCon { pm_con_con = con, pm_con_arg_tys = []
         , pm_con_tvs = [], pm_con_dicts = [], pm_con_args = [] }
 
-truePmPat :: Pattern
-truePmPat = nullaryPmConPat trueDataCon
+truePattern :: Pattern
+truePattern = nullaryConPattern trueDataCon
 
 -- | A fake guard pattern (True <- _) used to represent cases we *cannot* handle
 fake_pat :: Pattern
-fake_pat = PmGuard [truePmPat] (PmExprOther EWildPat)
+fake_pat = PmGuard [truePattern] (PmExprOther EWildPat)
 
-vanillaPmConPat :: DataCon -> [Type] -> PatVec -> Pattern
+vanillaConPattern :: DataCon -> [Type] -> PatVec -> Pattern
 -- ADT constructor pattern => no existentials, no local constraints
-vanillaPmConPat con arg_tys args = NonGuard $
+vanillaConPattern con arg_tys args = NonGuard $
   PmCon { pm_con_con = con, pm_con_arg_tys = arg_tys
         , pm_con_tvs = [], pm_con_dicts = [], pm_con_args = args }
 
-nilPmPat :: Type -> Pattern
-nilPmPat ty = NonGuard $ PmCon { pm_con_con = nilDataCon, pm_con_arg_tys = [ty]
-                               , pm_con_tvs = [], pm_con_dicts = []
-                               , pm_con_args = [] }
+nilPattern :: Type -> Pattern
+nilPattern ty = NonGuard $ PmCon { pm_con_con = nilDataCon, pm_con_arg_tys = [ty]
+                                 , pm_con_tvs = [], pm_con_dicts = []
+                                 , pm_con_args = [] }
 
-mkListPmPat :: Type -> PatVec -> PatVec -> PatVec
-mkListPmPat ty xs ys = [NonGuard $ PmCon { pm_con_con = consDataCon
-                                         , pm_con_arg_tys = [ty]
-                                         , pm_con_tvs = [], pm_con_dicts = []
-                                         , pm_con_args = xs++ys }]
+mkListPatVec :: Type -> PatVec -> PatVec -> PatVec
+mkListPatVec ty xs ys = [NonGuard $ PmCon { pm_con_con = consDataCon
+                                          , pm_con_arg_tys = [ty]
+                                          , pm_con_tvs = [], pm_con_dicts = []
+                                          , pm_con_args = xs++ys }]
 
-mkLitPmPat :: HsLit -> Pattern
-mkLitPmPat lit = NonGuard $ PmLit { pm_lit_lit = PmSLit lit }
+mkLitPattern :: HsLit -> Pattern
+mkLitPattern lit = NonGuard $ PmLit { pm_lit_lit = PmSLit lit }
 
-mkPosLitPmPat :: HsOverLit Id -> Pattern
-mkPosLitPmPat lit = NonGuard $ PmLit { pm_lit_lit = PmOLit False lit }
+mkPosLitPattern :: HsOverLit Id -> Pattern
+mkPosLitPattern lit = NonGuard $ PmLit { pm_lit_lit = PmOLit False lit }
 
-mkNegLitPmPat :: HsOverLit Id -> Pattern
-mkNegLitPmPat lit = NonGuard $ PmLit { pm_lit_lit = PmOLit True lit }
+mkNegLitPattern :: HsOverLit Id -> Pattern
+mkNegLitPattern lit = NonGuard $ PmLit { pm_lit_lit = PmOLit True lit }
 
 -- -----------------------------------------------------------------------
 -- | Transform a Pat Id into a list of (PmPat Id) -- Note [Translation to PmPat]
@@ -237,8 +234,8 @@ translatePat pat = case pat of
                                                -- This might affect the divergence checks?
   AsPat lid p -> do
     ps <- translatePat (unLoc p)
-    let [va] = coercePmPats ps -- has to be singleton
-        g    = PmGuard [idPatternVar (unLoc lid)] (valAbsToPmExpr va)
+    let [e] = map valAbsToPmExpr (coercePatVec ps) -- NOTE [Translating As Patterns]
+        g   = PmGuard [idPatternVar (unLoc lid)] e
     return (ps ++ [g])
 
   SigPatOut p _ty -> translatePat (unLoc p) -- TODO: Use the signature?
@@ -253,7 +250,7 @@ translatePat pat = case pat of
   NPlusKPat n k ge minus -> do
     (xp, xe) <- mkPmId2FormsSM $ idType (unLoc n)
     let ke = noLoc (HsOverLit k)         -- k as located expression
-        g1 = mkGuard [truePmPat]              $ OpApp xe (noLoc ge)    no_fixity ke -- True <- (x >= k)
+        g1 = mkGuard [truePattern]            $ OpApp xe (noLoc ge)    no_fixity ke -- True <- (x >= k)
         g2 = mkGuard [idPatternVar (unLoc n)] $ OpApp xe (noLoc minus) no_fixity ke -- n    <- (x -  k)
     return [xp, g1, g2]
 
@@ -264,13 +261,15 @@ translatePat pat = case pat of
     let g  = mkGuard ps (HsApp lexpr xe) -- p <- f x
     return [xp,g]
 
+  -- list
   ListPat ps ty Nothing -> do
-    foldr (mkListPmPat ty) [nilPmPat ty] <$> translatePatVec (map unLoc ps)
+    foldr (mkListPatVec ty) [nilPattern ty] <$> translatePatVec (map unLoc ps)
 
+  -- overloaded list
   ListPat lpats elem_ty (Just (pat_ty, to_list)) -> do
     (xp, xe) <- mkPmId2FormsSM pat_ty
     ps       <- translatePatVec (map unLoc lpats) -- list as value abstraction
-    let pats = foldr (mkListPmPat elem_ty) [nilPmPat elem_ty] ps
+    let pats = foldr (mkListPatVec elem_ty) [nilPattern elem_ty] ps
         g  = mkGuard pats (HsApp (noLoc to_list) xe) -- [...] <- toList x
     return [xp,g]
 
@@ -296,25 +295,25 @@ translatePat pat = case pat of
                               , pm_con_args    = args }]
 
   NPat lit mb_neg _eq
-    | Just _  <- mb_neg -> return [mkNegLitPmPat lit] -- negated literal
-    | Nothing <- mb_neg -> return [mkPosLitPmPat lit] -- non-negated literal
+    | Just _  <- mb_neg -> return [mkNegLitPattern lit] -- negated literal
+    | Nothing <- mb_neg -> return [mkPosLitPattern lit] -- non-negated literal
 
   LitPat lit
       -- If it is a string then convert it to a list of characters
     | HsString src s <- lit ->
-        foldr (mkListPmPat charTy) [nilPmPat charTy] <$>
+        foldr (mkListPatVec charTy) [nilPattern charTy] <$>
           translatePatVec (map (LitPat . HsChar src) (unpackFS s))
-    | otherwise -> return [mkLitPmPat lit]
+    | otherwise -> return [mkLitPattern lit]
 
   PArrPat ps ty -> do
     tidy_ps <- translatePatVec (map unLoc ps)
     let fake_con = parrFakeCon (length ps)
-    return [vanillaPmConPat fake_con [ty] (concat tidy_ps)]
+    return [vanillaConPattern fake_con [ty] (concat tidy_ps)]
 
   TuplePat ps boxity tys -> do
     tidy_ps   <- translatePatVec (map unLoc ps)
     let tuple_con = tupleCon (boxityNormalTupleSort boxity) (length ps)
-    return [vanillaPmConPat tuple_con tys (concat tidy_ps)]
+    return [vanillaConPattern tuple_con tys (concat tidy_ps)]
 
   -- --------------------------------------------------------------------------
   -- Not supposed to happen
@@ -439,7 +438,7 @@ translateBoolGuard e
     -- The formal thing to do would be to generate (True <- True)
     -- but it is trivial to solve so instead we give back an empty
     -- PatVec for efficiency
-  | otherwise = return [PmGuard [truePmPat] (lhsExprToPmExpr e)]
+  | otherwise = return [PmGuard [truePattern] (lhsExprToPmExpr e)]
 
 {-
 %************************************************************************
@@ -610,11 +609,11 @@ mkCons :: ValAbs -> ValSetAbs -> ValSetAbs
 mkCons _ Empty = Empty
 mkCons va vsa  = Cons va vsa
 
-mkGuard :: PatVec -> HsExpr Id -> Pattern
-mkGuard pv e = PmGuard pv (hsExprToPmExpr e)
-
 -- ----------------------------------------------------------------------------
 -- | More smart constructors and fresh variable generation
+
+mkGuard :: PatVec -> HsExpr Id -> Pattern
+mkGuard pv e = PmGuard pv (hsExprToPmExpr e)
 
 mkPmVar :: UniqSupply -> Type -> PmPat p
 mkPmVar usupply ty = PmVar (mkPmId usupply ty)
@@ -659,9 +658,10 @@ pmPatToPmExpr (PmCon { pm_con_con  = c
 pmPatToPmExpr (PmVar { pm_var_id   = x  }) = PmExprVar x
 pmPatToPmExpr (PmLit { pm_lit_lit  = l  }) = PmExprLit l
 
--- Drop the guards recursively
-coercePmPats :: PatVec -> [ValAbs]
-coercePmPats pv = [ VA (coercePmPat p) | NonGuard p <- pv]
+-- Convert a pattern vector to a value list abstraction by dropping the guards
+-- recursively (See NOTE [Translating As Patterns])
+coercePatVec :: PatVec -> [ValAbs]
+coercePatVec pv = [ VA (coercePmPat p) | NonGuard p <- pv]
 
 coercePmPat :: PmPat Pattern -> PmPat ValAbs
 coercePmPat (PmVar { pm_var_id  = x }) = PmVar { pm_var_id  = x }
@@ -671,7 +671,7 @@ coercePmPat (PmCon { pm_con_con = con, pm_con_arg_tys = arg_tys
                    , pm_con_args = args })
   = PmCon { pm_con_con  = con, pm_con_arg_tys = arg_tys
           , pm_con_tvs  = tvs, pm_con_dicts = dicts
-          , pm_con_args = coercePmPats args }
+          , pm_con_args = coercePatVec args }
 
 no_fixity :: a -- CHECKME: Can we retrieve the fixity from the operator name?
 no_fixity = panic "Check: no fixity"
@@ -768,6 +768,8 @@ tyOracle evs
 {-
 Note [Pattern match check give up]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+We don't give up anymore. Check our behaviour on these cases.
+
 A simple example is trac #322:
 \begin{verbatim}
   f :: Maybe Int -> Int
@@ -1091,7 +1093,7 @@ pprOne (vs,(complex, subst)) =
 
 {-
 NOTE [Type and Term Equality Propagation]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 When checking a match it would be great to have all type and term information
 available so we can get more precise results. For this reason we have functions
 `addDictsDs' and `addTmCsDs' in DsMonad that store in the environment type and
@@ -1131,7 +1133,7 @@ genCaseTmCs2 :: Maybe (LHsExpr Id) -- Scrutinee
              -> DsM (Bag SimpleEq)
 genCaseTmCs2 Nothing _ _ = return emptyBag
 genCaseTmCs2 (Just scr) [p] [var] = liftUs $ do
-  [e] <- map valAbsToPmExpr . coercePmPats <$> translatePat p
+  [e] <- map valAbsToPmExpr . coercePatVec <$> translatePat p
   let scr_e = lhsExprToPmExpr scr
   return $ listToBag [(var, e), (var, scr_e)]
 genCaseTmCs2 _ _ _ = panic "genCaseTmCs2: HsCase"
@@ -1145,3 +1147,50 @@ genCaseTmCs1 Nothing     _    = emptyBag
 genCaseTmCs1 (Just scr) [var] = unitBag (var, lhsExprToPmExpr scr)
 genCaseTmCs1 _ _              = panic "genCaseTmCs1: HsCase"
 
+{-
+NOTE [Literals in PmPat]
+~~~~~~~~~~~~~~~~~~~~~~~~
+Instead of translating a literal to a variable accompanied with a guard, we
+treat them like constructor patterns. The following example from
+"./libraries/base/GHC/IO/Encoding.hs" shows why:
+
+mkTextEncoding' :: CodingFailureMode -> String -> IO TextEncoding
+mkTextEncoding' cfm enc = case [toUpper c | c <- enc, c /= '-'] of
+    "UTF8"    -> return $ UTF8.mkUTF8 cfm
+    "UTF16"   -> return $ UTF16.mkUTF16 cfm
+    "UTF16LE" -> return $ UTF16.mkUTF16le cfm
+    ...
+
+Each clause gets translated to a list of variables with an equal number of
+guards. For every guard we generate two cases (equals True/equals False) which
+means that we generate 2^n cases to feed the oracle with, where n is the sum of
+the length of all strings that appear in the patterns. For this particular
+example this means over 2^40 cases. Instead, by representing them like with
+constructor we get the following:
+  1. We exploit the common prefix with our representation of Value Set Abstractions
+  2. We prune immediately non-reachable cases
+     (e.g. False == (x == "U"), True == (x == "U"))
+-}
+
+
+{-
+NOTE [Translating As Patterns]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Instead of translating x@p as:  x (p <- x)
+we instead translate it as:     p (x <- coercePattern p)
+for performance reasons. For example:
+
+  f x@True  = 1
+  f y@False = 2
+
+Gives the following with the first translation:
+
+  x |> {x == False, x == y, y == True}
+
+If we use the second translation we get an empty set, independently of the
+oracle. Since the pattern `p' may contain guard patterns though, it cannot be
+used as an expression. That's why we call `coercePatVec' to drop the guard and
+`valAbsToPmExpr' to transform the value abstraction to an expression in the
+guard pattern (value abstractions are a subset of expressions). We keep the
+guards in the first pattern `p' though.
+-}
