@@ -906,17 +906,21 @@ runStmt stmt step
  | null (filter (not.isSpace) stmt)
  = return Nothing
 
- -- import
- | stmt `looks_like` "import "
- = do addImportToContext stmt; return (Just (GHC.ExecComplete (Right []) 0))
-
  | otherwise
  = do
-     parse_res <- GhciMonad.isStmt stmt
-     if parse_res
+     dflags <- GHC.getInteractiveDynFlags
+     if GHC.isStmt dflags stmt
        then run_stmt
-       else run_decl
+       else do
+          if GHC.isImport dflags stmt
+            then run_imports
+            else run_decl
+
   where
+    run_imports = do
+      addImportToContext stmt
+      return (Just (GHC.ExecComplete (Right []) 0))
+
     run_decl =
         do _ <- liftIO $ tryIO $ hFlushAll stdin
            m_result <- GhciMonad.runDecls stmt
@@ -937,11 +941,6 @@ runStmt stmt step
            case m_result of
                Nothing     -> return Nothing
                Just result -> Just <$> afterRunStmt (const True) result
-
-    s `looks_like` prefix = prefix `isPrefixOf` dropWhile isSpace s
-       -- Ignore leading spaces (see Trac #9914), so that
-       --    ghci>   data T = T
-       -- (note leading spaces) works properly
 
 -- | Clean up the GHCi environment after a statement has run
 afterRunStmt :: (SrcSpan -> Bool) -> GHC.ExecResult -> GHCi GHC.ExecResult

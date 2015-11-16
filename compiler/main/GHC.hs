@@ -96,6 +96,7 @@ module GHC (
 
         -- ** Adding new declarations
         runDecls, runDeclsWithLocation,
+        isStmt, isImport, isDecl,
 
         -- ** Get/set the current context
         parseImportDecl,
