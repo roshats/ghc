@@ -31,17 +31,23 @@ show foo
 
 import Data.Char
 
+:seti -XDefaultSignatures
 :{
 class HasString a where
   update :: a -> (String -> String) -> a
 
   upcase :: a -> a
   upcase x = update x (fmap toUpper)
+
+  content :: a -> String
+  default content :: Show a => a -> String
+  content = show
 :}
 
 :{
 instance HasString Foo where
   update (Foo s) f = Foo (f s)
+  content (Foo s) = s
 :}
 
 upcase foo
