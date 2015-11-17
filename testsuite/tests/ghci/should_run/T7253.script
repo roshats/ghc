@@ -26,6 +26,7 @@ data Foo = Foo String
 :seti -XStandaloneDeriving
 deriving instance Show Foo
 
+-- ^ Just a 'foo' function.
 foo = Foo "Some foo"
 show foo
 
@@ -55,3 +56,14 @@ upcase foo
 {-# RULES "map/map" forall f g xs. map f (map g xs) = map (f.g) xs #-}
 {-# ANN foo (Just "Hello") #-}
 {-# NOVECTORISE foo #-}
+
+:seti -XRoleAnnotations
+:{
+type role T1 _ phantom
+data T1 a b = MkT1 b
+:}
+
+:{
+type role T2 _ nominal
+data T2 a b = MkT2 a
+:}
