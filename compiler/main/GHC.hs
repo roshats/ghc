@@ -96,7 +96,6 @@ module GHC (
 
         -- ** Adding new declarations
         runDecls, runDeclsWithLocation,
-        isStmt, isImport, isDecl,
 
         -- ** Get/set the current context
         parseImportDecl,
@@ -131,6 +130,7 @@ module GHC (
 
         -- ** Other
         runTcInteractive,   -- Desired by some clients (Trac #8878)
+        isStmt, isImport, isDecl,
 
         -- ** The debugger
         SingleStep(..),
