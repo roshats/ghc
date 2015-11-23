@@ -991,16 +991,14 @@ parseName str = withSession $ \hsc_env -> liftIO $
       ; hscTcRnLookupRdrName hsc_env lrdr_name }
 
 isStmt :: DynFlags -> String -> Bool
-isStmt dflags stmt = do
-  let res = parseThing Parser.parseStmt dflags stmt
-  case res of
+isStmt dflags stmt =
+  case parseThing Parser.parseStmt dflags stmt of
     Lexer.POk _ _ -> True
     Lexer.PFailed _ _ -> False
 
 isImport :: DynFlags -> String -> Bool
-isImport dflags stmt = do
-  let res = parseThing Parser.parseModule dflags stmt
-  case res of
+isImport dflags stmt =
+  case parseThing Parser.parseModule dflags stmt of
     Lexer.POk _ thing -> hasImports thing
     Lexer.PFailed _ _ -> False
   where
