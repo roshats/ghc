@@ -900,21 +900,14 @@ enqueueCommands cmds = do
 -- | Entry point to execute some haskell code from user.
 -- The return value True indicates success, as in `runOneCommand`.
 runStmt :: String -> SingleStep -> GHCi (Maybe GHC.ExecResult)
-runStmt stmt step
- -- empty; this should be impossible anyways since we filtered out
- -- whitespace-only input in runOneCommand's noSpace
- | null (filter (not.isSpace) stmt)
- = return Nothing
-
- | otherwise
- = do
-     dflags <- GHC.getInteractiveDynFlags
-     if GHC.isStmt dflags stmt
-       then run_stmt
-       else do
-          if GHC.isImport dflags stmt
-            then run_imports
-            else run_decl
+runStmt stmt step = do
+  dflags <- GHC.getInteractiveDynFlags
+  if GHC.isStmt dflags stmt
+    then run_stmt
+    else
+      if GHC.isImport dflags stmt
+        then run_imports
+        else run_decl
 
   where
     run_imports = do
