@@ -86,7 +86,7 @@ import Outputable
 import FastString
 import Bag
 import qualified Lexer (P (..), ParseResult(..), unP, mkPState)
-import qualified Parser (parseStmt, parseModule)
+import qualified Parser (parseStmt, parseModule, parseDeclaration)
 
 import System.Mem.Weak
 import System.Directory
@@ -1006,9 +1006,12 @@ isImport dflags stmt =
 
 isDecl :: DynFlags -> String -> Bool
 isDecl dflags stmt = do
-  let checkImport = isImport dflags stmt
-  let checkStmt = isStmt dflags stmt
-  not (checkImport || checkStmt)
+  case parseThing Parser.parseDeclaration dflags stmt of
+    Lexer.POk _ thing ->
+      case unLoc thing of
+        SpliceD _ -> False
+        _ -> True
+    Lexer.PFailed _ _ -> False
 
 parseThing :: Lexer.P thing -> DynFlags -> String -> Lexer.ParseResult thing
 parseThing parser dflags stmt = do
