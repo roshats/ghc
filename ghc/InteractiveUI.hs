@@ -1,5 +1,5 @@
 {-# LANGUAGE CPP, MagicHash, NondecreasingIndentation, TupleSections,
-             RecordWildCards #-}
+             RecordWildCards, MultiWayIf #-}
 {-# OPTIONS -fno-cse #-}
 -- -fno-cse is needed for GLOBAL_VAR's to behave properly
 
@@ -902,12 +902,10 @@ enqueueCommands cmds = do
 runStmt :: String -> SingleStep -> GHCi (Maybe GHC.ExecResult)
 runStmt stmt step = do
   dflags <- GHC.getInteractiveDynFlags
-  if GHC.isStmt dflags stmt
-    then run_stmt
-    else
-      if GHC.isImport dflags stmt
-        then run_imports
-        else run_decl
+  if | GHC.isStmt dflags stmt   -> run_stmt
+     | GHC.isImport dflags stmt -> run_imports
+     | GHC.isDecl dflags stmt   -> run_decl
+     | otherwise                -> return Nothing -- TODO: handleError
 
   where
     run_imports = do
