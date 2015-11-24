@@ -990,12 +990,14 @@ parseName str = withSession $ \hsc_env -> liftIO $
    do { lrdr_name <- hscParseIdentifier hsc_env str
       ; hscTcRnLookupRdrName hsc_env lrdr_name }
 
+-- | Returns @True@ if passed string is a statement.
 isStmt :: DynFlags -> String -> Bool
 isStmt dflags stmt =
   case parseThing Parser.parseStmt dflags stmt of
     Lexer.POk _ _ -> True
     Lexer.PFailed _ _ -> False
 
+-- | Returns @True@ if passed string is an import declaration.
 isImport :: DynFlags -> String -> Bool
 isImport dflags stmt =
   case parseThing Parser.parseModule dflags stmt of
@@ -1004,6 +1006,7 @@ isImport dflags stmt =
   where
     hasImports = not . null . hsmodImports . unLoc
 
+-- | Returns @True@ if passed string is a declaration.
 isDecl :: DynFlags -> String -> Bool
 isDecl dflags stmt = do
   case parseThing Parser.parseDeclaration dflags stmt of
