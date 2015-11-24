@@ -904,8 +904,7 @@ runStmt stmt step = do
   dflags <- GHC.getInteractiveDynFlags
   if | GHC.isStmt dflags stmt   -> run_stmt
      | GHC.isImport dflags stmt -> run_imports
-     | GHC.isDecl dflags stmt   -> run_decl
-     | otherwise                -> return Nothing -- TODO: handleError
+     | otherwise                -> run_decl
 
   where
     run_imports = do
