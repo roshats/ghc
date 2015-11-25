@@ -23,6 +23,9 @@ add a b: False
 let foo = add a b: False
 x <- foo y: False
 5 + 8: False
+a <-: False
+2 +: False
+@#: False
 
 Is declaration:
 import Data.Maybe: False
@@ -49,6 +52,9 @@ add a b: False
 let foo = add a b: False
 x <- foo y: False
 5 + 8: False
+a <-: False
+2 +: False
+@#: False
 
 Is statement:
 import Data.Maybe: False
@@ -75,3 +81,6 @@ add a b: True
 let foo = add a b: True
 x <- foo y: True
 5 + 8: True
+a <-: False
+2 +: False
+@#: False

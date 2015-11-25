@@ -32,6 +32,10 @@ testStrings = [
   , "let foo = add a b"
   , "x <- foo y"
   , "5 + 8"
+
+  , "a <-"
+  , "2 +"
+  , "@#"
   ]
 
 main = do
