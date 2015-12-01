@@ -1006,7 +1006,7 @@ isImport dflags stmt =
   where
     hasImports = not . null . hsmodImports . unLoc
 
--- | Returns @True@ if passed string is a declaration.
+-- | Returns @True@ if passed string is a declaration but __/not a splice/__.
 isDecl :: DynFlags -> String -> Bool
 isDecl dflags stmt = do
   case parseThing Parser.parseDeclaration dflags stmt of
